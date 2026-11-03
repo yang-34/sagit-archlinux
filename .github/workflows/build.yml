@@ -245,10 +245,15 @@ jobs:
           pacman-key --init
           pacman-key --populate archlinuxarm
           $PM -Sy --noconfirm
-          $PM -S --noconfirm --needed --overwrite '/usr/lib/firmware/*' \
+          $PM -S --noconfirm --needed \
             openssh networkmanager wpa_supplicant iw \
-            sudo vim nano htop git linux-firmware mesa
+            sudo vim nano htop git mesa
           $PM -S --noconfirm --needed weston seatd || echo "optional packages skipped"
+          rm -rf /var/cache/pacman/pkg/*
+          if [ -d /usr/lib/firmware ]; then
+            find /usr/lib/firmware -mindepth 1 -maxdepth 1 ! -name ath10k ! -name qcom -exec rm -rf {} +
+          fi
+          echo "rootfs size:"; du -sh /usr /var 2>/dev/null || true
           mkdir -p /etc/systemd/system/multi-user.target.wants
           ln -sf /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
           ln -sf /usr/lib/systemd/system/NetworkManager.service /etc/systemd/system/multi-user.target.wants/NetworkManager.service
