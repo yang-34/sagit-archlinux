@@ -307,6 +307,5 @@ jobs:
             out/boot.img out/rootfs.simg.part* out/modules.tar.gz \
             --title "sagit archlinux $TAG" \
             --notes "kernel: $(cat /tmp/krel.txt)
-
-合并分片后刷入: cat rootfs.simg.part* > rootfs.simg (Windows: copy /b rootfs.simg.part00+rootfs.simg.part01 rootfs.simg)" \
+            合并分片后刷入: cat rootfs.simg.part* > rootfs.simg (Windows: copy /b rootfs.simg.part00+rootfs.simg.part01 rootfs.simg)" \
             --repo "${{ github.repository }}"
