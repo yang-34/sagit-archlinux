@@ -206,25 +206,32 @@ jobs:
       - name: Install packages in rootfs
         run: |
           set -eux
-          sudo chroot /mnt/root /bin/bash -c '
-            set -eux
-            cat > /etc/pacman.d/mirrorlist <<MIRROREOF
-          Server = http://mirror.archlinuxarm.org/\$arch/\$repo
+          cat > /tmp/setup.sh <<'SETUPEOF'
+          #!/bin/bash
+          set -eux
+          cat > /etc/pacman.d/mirrorlist <<'MIRROREOF'
+          Server = http://mirror.archlinuxarm.org/$arch/$repo
           MIRROREOF
-            if pacman -V | grep -qE '^Pacman v7'; then
-              grep -q '^DisableSandbox' /etc/pacman.conf || sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf
-            fi
+          if pacman -V | grep -qE "^Pacman v7"; then
+            grep -q "^DisableSandbox" /etc/pacman.conf || sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf
+          fi
+          if ! pacman -Sy --noconfirm; then
+            pacman-key --init
+            pacman-key --populate archlinuxarm
             pacman -Sy --noconfirm
-            pacman -S --noconfirm --needed openssh networkmanager wpa_supplicant iw \
-              sudo vim nano htop git linux-firmware mesa weston seatd
-            mkdir -p /etc/systemd/system/multi-user.target.wants
-            ln -sf /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
-            ln -sf /usr/lib/systemd/system/NetworkManager.service /etc/systemd/system/multi-user.target.wants/NetworkManager.service
-            printf "root:root\n" | chpasswd
-            echo "LABEL=archroot / ext4 defaults,noatime 0 1" > /etc/fstab
-            echo sagit-archlinux > /etc/hostname
-            locale -a | head -5 || true
-          '
+          fi
+          pacman -S --noconfirm --needed openssh networkmanager wpa_supplicant iw \
+            sudo vim nano htop git linux-firmware mesa weston seatd
+          mkdir -p /etc/systemd/system/multi-user.target.wants
+          ln -sf /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
+          ln -sf /usr/lib/systemd/system/NetworkManager.service /etc/systemd/system/multi-user.target.wants/NetworkManager.service
+          printf "root:root\n" | chpasswd
+          echo "LABEL=archroot / ext4 defaults,noatime 0 1" > /etc/fstab
+          echo sagit-archlinux > /etc/hostname
+          SETUPEOF
+          sudo cp /tmp/setup.sh /mnt/root/setup.sh
+          sudo chmod +x /mnt/root/setup.sh
+          sudo chroot /mnt/root /setup.sh
 
       - name: Copy kernel modules into rootfs
         run: |
