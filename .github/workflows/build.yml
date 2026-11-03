@@ -243,7 +243,8 @@ jobs:
             $PM -Sy --noconfirm
           fi
           $PM -S --noconfirm --needed openssh networkmanager wpa_supplicant iw \
-            sudo vim nano htop git linux-firmware mesa weston seatd
+            sudo vim nano htop git linux-firmware mesa
+          $PM -S --noconfirm --needed weston seatd || echo "optional packages skipped"
           mkdir -p /etc/systemd/system/multi-user.target.wants
           ln -sf /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
           ln -sf /usr/lib/systemd/system/NetworkManager.service /etc/systemd/system/multi-user.target.wants/NetworkManager.service
