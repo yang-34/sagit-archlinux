@@ -1,8 +1,6 @@
 name: build
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -244,11 +242,9 @@ jobs:
           else
             PM="pacman"
           fi
-          if ! $PM -Sy --noconfirm; then
-            pacman-key --init
-            pacman-key --populate archlinuxarm
-            $PM -Sy --noconfirm
-          fi
+          pacman-key --init
+          pacman-key --populate archlinuxarm
+          $PM -Sy --noconfirm
           $PM -S --noconfirm --needed openssh networkmanager wpa_supplicant iw \
             sudo vim nano htop git linux-firmware mesa
           $PM -S --noconfirm --needed weston seatd || echo "optional packages skipped"
