@@ -211,7 +211,14 @@ jobs:
           sudo mount --bind /dev /mnt/root/dev
           sudo mkdir -p /mnt/root/dev/pts
           sudo mount --bind /dev/pts /mnt/root/dev/pts
-          sudo cp /etc/resolv.conf /mnt/root/etc/resolv.conf
+          echo "host resolv.conf:"; cat /etc/resolv.conf
+          sudo sh -c 'printf "nameserver 168.63.129.16\nnameserver 8.8.8.8\nnameserver 1.1.1.1\n" > /mnt/root/etc/resolv.conf'
+          for h in mirror.archlinuxarm.org mirrors.tuna.tsinghua.edu.cn; do
+            for ip in $(getent ahostsv4 "$h" | awk '{print $1}' | sort -u | head -4); do
+              echo "$ip $h"
+            done | sudo tee -a /mnt/root/etc/hosts
+          done
+          echo "chroot hosts:"; sudo tail -12 /mnt/root/etc/hosts
           ls /mnt/root
 
       - name: Install packages in rootfs
@@ -223,6 +230,8 @@ jobs:
           cat > /etc/pacman.d/mirrorlist <<'MIRROREOF'
           Server = http://mirror.archlinuxarm.org/$arch/$repo
           MIRROREOF
+          echo "resolve check:"
+          getent hosts mirror.archlinuxarm.org || true
           if pacman --disable-sandbox -V >/dev/null 2>&1; then
             PM="pacman --disable-sandbox"
           else
