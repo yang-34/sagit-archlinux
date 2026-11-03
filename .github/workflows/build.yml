@@ -247,7 +247,8 @@ jobs:
           $PM -Sy --noconfirm
           $PM -S --noconfirm --needed \
             openssh networkmanager wpa_supplicant iw \
-            sudo nano htop
+            sudo vim nano htop git mesa
+          $PM -S --noconfirm --needed weston seatd || echo "optional packages skipped"
           rm -rf /var/cache/pacman/pkg/*
           if [ -d /usr/lib/firmware ]; then
             find /usr/lib/firmware -mindepth 1 -maxdepth 1 ! -name ath10k ! -name qcom -exec rm -rf {} +
@@ -291,7 +292,10 @@ jobs:
           ls -lh /tmp/rootfs.simg
           sha256sum /tmp/rootfs.simg /tmp/boot.img
           mkdir -p "$GITHUB_WORKSPACE/out"
-          cp /tmp/rootfs.simg "$GITHUB_WORKSPACE/out/"
+          rm -f "$GITHUB_WORKSPACE"/out/rootfs.simg.part*
+          split -b 1900M -d -a 2 /tmp/rootfs.simg "$GITHUB_WORKSPACE/out/rootfs.simg.part"
+          ls -lh "$GITHUB_WORKSPACE/out"
+          sha256sum "$GITHUB_WORKSPACE"/out/rootfs.simg.part*
 
       - name: Create release with assets
         env:
@@ -300,7 +304,9 @@ jobs:
           set -eux
           TAG="build-${{ github.run_number }}"
           gh release create "$TAG" \
-            out/boot.img out/rootfs.simg out/modules.tar.gz \
+            out/boot.img out/rootfs.simg.part* out/modules.tar.gz \
             --title "sagit archlinux $TAG" \
-            --notes "kernel: $(cat /tmp/krel.txt)" \
+            --notes "kernel: $(cat /tmp/krel.txt)
+
+合并分片后刷入: cat rootfs.simg.part* > rootfs.simg (Windows: copy /b rootfs.simg.part00+rootfs.simg.part01 rootfs.simg)" \
             --repo "${{ github.repository }}"
