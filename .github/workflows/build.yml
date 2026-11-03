@@ -264,16 +264,15 @@ jobs:
         run: |
           set -eux
           sudo tar -xzf /tmp/modules.tar.gz -C /mnt/root/
-          sudo chroot /mnt/root /bin/bash -c 'depmod -a || true; ls /lib/modules'
+          sudo chroot /mnt/root /bin/bash -c 'DEP=$(ls /lib/modules | head -1); echo "modules: $DEP"; depmod -a "$DEP" || true'
 
       - name: Unmount rootfs
         run: |
           set -eux
-          sudo umount /mnt/root/dev/pts || true
-          sudo umount /mnt/root/dev || true
-          sudo umount /mnt/root/sys || true
-          sudo umount /mnt/root/proc || true
-          sudo umount /mnt/root
+          sudo fuser -vm /mnt/root || true
+          sudo umount -R /mnt/root || sudo umount -Rl /mnt/root || true
+          mount | grep /mnt/root || true
+          for d in $(losetup -j /tmp/rootfs.img | cut -d: -f1); do sudo losetup -d "$d" || true; done
           ls -lh /tmp/rootfs.img
           du -h /tmp/rootfs.img
 
