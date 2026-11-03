@@ -1,0 +1,254 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KERNEL_REPO: https://github.com/degdag/W.I.P_sagit_mainline.git
+  KERNEL_BRANCH: master
+  ARCH: arm64
+  CROSS: aarch64-linux-gnu-
+  ROOTFS_BYTES: "56446922752"
+  ROOTFS_URL: https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+          nproc
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev \
+            device-tree-compiler cpio xz-utils zstd curl \
+            abootimg android-sdk-libsparse-utils qemu-user-static binfmt-support
+          sudo update-binfmts --enable qemu-aarch64 || true
+          command -v img2simg || echo "no img2simg, will use python fallback"
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth 1 --branch "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+          cd kernel
+          git log -1 --oneline
+          ls arch/arm64/configs/ | grep -i sagit
+
+      - name: Configure kernel
+        run: |
+          cd kernel
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS sagit_defconfig
+          set +e
+          scripts/config --file .config \
+            -e DEVTMPFS -e DEVTMPFS_MOUNT \
+            -e DRM -e DRM_MSM -e DRM_FBDEV_EMULATION -e DRM_PANEL_JDI_FHD_R63452 \
+            -e FB -e FRAMEBUFFER_CONSOLE -e VT -e VT_CONSOLE \
+            -e RMI4_CORE -e RMI4_I2C \
+            -e SCSI_UFS_QCOM -e SCSI_UFSHCD -e SCSI_UFSHCD_PLTFRM \
+            -e EFI_PARTITION -e EXT4_FS \
+            -e SERIAL_MSM_GENI -e QCOM_GENI_SE \
+            -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS -e USB_F_ECM \
+            -e ANDROID_BINDERFS -e MODULES
+          set -e
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS olddefconfig
+          echo "=== key symbols ==="
+          for s in CONFIG_DRM_MSM CONFIG_DRM_PANEL_JDI_FHD_R63452 CONFIG_DRM_FBDEV_EMULATION \
+                   CONFIG_FRAMEBUFFER_CONSOLE CONFIG_RMI4_CORE CONFIG_RMI4_I2C \
+                   CONFIG_SCSI_UFS_QCOM CONFIG_EFI_PARTITION CONFIG_EXT4_FS \
+                   CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_MSM_GENI CONFIG_USB_CONFIGFS \
+                   CONFIG_ANDROID_BINDERFS CONFIG_MODULES; do
+            printf '%-42s %s\n' "$s" "$(grep -E "^$s=" .config || echo MISSING)"
+          done
+
+      - name: Build kernel
+        run: |
+          cd kernel
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS -j"$(nproc)" Image.gz dtbs modules
+          ls -l arch/arm64/boot/Image.gz
+          ls -l arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dtb
+
+      - name: Assemble Image.gz-dtb and modules
+        run: |
+          set -eux
+          cd kernel
+          cat arch/arm64/boot/Image.gz arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dtb > Image.gz-dtb
+          make -s ARCH=$ARCH CROSS_COMPILE=$CROSS kernelrelease > /tmp/krel.txt
+          cat /tmp/krel.txt
+          rm -rf modroot
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS INSTALL_MOD_PATH="$PWD/modroot" modules_install
+          tar -czf /tmp/modules.tar.gz -C modroot lib/modules
+          ls -lh Image.gz-dtb /tmp/modules.tar.gz
+
+      - name: Build initramfs
+        run: |
+          set -eux
+          cd /tmp
+          curl -fsSL https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/aarch64/ -o alindex.html
+          PKG=$(grep -oE 'busybox-static-[0-9]+[^"<]*\.apk' alindex.html | head -1)
+          echo "busybox pkg: $PKG"
+          curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/aarch64/$PKG" -o bb.apk
+          mkdir -p bb
+          tar -xzf bb.apk -C bb || true
+          BB=$(find bb -type f -name 'busybox*' | head -1)
+          file "$BB"
+          mkdir -p initramfs/bin initramfs/dev initramfs/proc initramfs/sys initramfs/etc initramfs/tmp initramfs/newroot
+          cp "$BB" initramfs/bin/busybox
+          chmod +x initramfs/bin/busybox
+          for a in sh mount umount blkid sleep switch_root mkdir cat ls echo dmesg mdev \
+                   reboot poweroff insmod modprobe ifconfig ip find grep; do
+            ln -sf /bin/busybox initramfs/bin/$a
+          done
+          cat > initramfs/init <<'INITEOF'
+          #!/bin/sh
+          export PATH=/bin
+          mount -t devtmpfs devtmpfs /dev 2>/dev/null
+          mount -t proc proc /proc
+          mount -t sysfs sysfs /sys
+          i=0
+          while [ $i -lt 60 ]; do
+            R=$(blkid -L archroot 2>/dev/null)
+            [ -n "$R" ] && break
+            [ -b /dev/sda17 ] && { R=/dev/sda17; break; }
+            i=$((i+1))
+            sleep 1
+          done
+          echo "root device: ${R:-none}"
+          [ -z "$R" ] && R=/dev/sda17
+          mount -t ext4 -o rw,noatime "$R" /newroot || { echo "root mount failed"; exec sh; }
+          mount --move /dev /newroot/dev
+          mount --move /proc /newroot/proc
+          mount --move /sys /newroot/sys
+          exec switch_root /newroot /sbin/init
+          INITEOF
+          chmod +x initramfs/init
+          cd initramfs
+          find . | cpio -o -H newc 2>/dev/null | gzip -9 > /tmp/initramfs.gz
+          ls -lh /tmp/initramfs.gz
+
+      - name: Package boot.img
+        run: |
+          set -eux
+          cd kernel
+          cat > /tmp/bootimg.cfg <<'CFGEOF'
+          bootsize = 67108864
+          pagesize = 4096
+          kerneladdr = 0x00008000
+          ramdiskaddr = 0x01000000
+          secondaddr = 0x00F00000
+          tagsaddr = 0x00000100
+          name = sagit-archlinux
+          cmdline = console=ttyMSM0,115200n8 root=/dev/sda17 rw rootwait rootfstype=ext4 earlycon
+          CFGEOF
+          abootimg --create /tmp/boot.img -f /tmp/bootimg.cfg -k Image.gz-dtb -r /tmp/initramfs.gz
+          abootimg -i /tmp/boot.img
+          ls -lh /tmp/boot.img
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp /tmp/boot.img /tmp/modules.tar.gz "$GITHUB_WORKSPACE/out/"
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel
+          path: out/
+          retention-days: 30
+
+      - name: Download Arch rootfs tarball
+        run: |
+          set -eux
+          curl -fSL --retry 3 -o /tmp/arch.tar.gz "$ROOTFS_URL"
+          ls -lh /tmp/arch.tar.gz
+
+      - name: Build ext4 rootfs image
+        run: |
+          set -eux
+          truncate -s "$ROOTFS_BYTES" /tmp/rootfs.img
+          sudo mkfs.ext4 -F -L archroot -m 0 /tmp/rootfs.img
+          sudo mkdir -p /mnt/root
+          sudo mount -o loop /tmp/rootfs.img /mnt/root
+          sudo tar -xzf /tmp/arch.tar.gz -C /mnt/root --numeric-owner
+          sudo cp /usr/bin/qemu-aarch64-static /mnt/root/usr/bin/
+          sudo mount --bind /proc /mnt/root/proc
+          sudo mount --bind /sys /mnt/root/sys
+          sudo mount --bind /dev /mnt/root/dev
+          sudo mkdir -p /mnt/root/dev/pts
+          sudo mount --bind /dev/pts /mnt/root/dev/pts
+          sudo cp /etc/resolv.conf /mnt/root/etc/resolv.conf
+          ls /mnt/root
+
+      - name: Install packages in rootfs
+        run: |
+          set -eux
+          sudo chroot /mnt/root /bin/bash -c '
+            set -eux
+            cat > /etc/pacman.d/mirrorlist <<MIRROREOF
+          Server = http://mirror.archlinuxarm.org/\$arch/\$repo
+          MIRROREOF
+            pacman -Sy --noconfirm
+            pacman -S --noconfirm --needed openssh networkmanager wpa_supplicant iw \
+              sudo vim nano htop git linux-firmware mesa weston seatd
+            mkdir -p /etc/systemd/system/multi-user.target.wants
+            ln -sf /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
+            ln -sf /usr/lib/systemd/system/NetworkManager.service /etc/systemd/system/multi-user.target.wants/NetworkManager.service
+            printf "root:root\n" | chpasswd
+            echo "LABEL=archroot / ext4 defaults,noatime 0 1" > /etc/fstab
+            echo sagit-archlinux > /etc/hostname
+            locale -a | head -5 || true
+          '
+
+      - name: Copy kernel modules into rootfs
+        run: |
+          set -eux
+          sudo tar -xzf /tmp/modules.tar.gz -C /mnt/root/
+          sudo chroot /mnt/root /bin/bash -c 'depmod -a || true; ls /lib/modules'
+
+      - name: Unmount rootfs
+        run: |
+          set -eux
+          sudo umount /mnt/root/dev/pts || true
+          sudo umount /mnt/root/dev || true
+          sudo umount /mnt/root/sys || true
+          sudo umount /mnt/root/proc || true
+          sudo umount /mnt/root
+          ls -lh /tmp/rootfs.img
+          du -h /tmp/rootfs.img
+
+      - name: Convert to sparse image
+        run: |
+          set -eux
+          if command -v img2simg >/dev/null 2>&1; then
+            img2simg /tmp/rootfs.img /tmp/rootfs.simg || python3 scripts/mk_sparse.py /tmp/rootfs.img /tmp/rootfs.simg
+          else
+            python3 scripts/mk_sparse.py /tmp/rootfs.img /tmp/rootfs.simg
+          fi
+          ls -lh /tmp/rootfs.simg
+          sha256sum /tmp/rootfs.simg /tmp/boot.img
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp /tmp/rootfs.simg "$GITHUB_WORKSPACE/out/"
+
+      - name: Create release with assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" \
+            out/boot.img out/rootfs.simg out/modules.tar.gz \
+            --title "sagit archlinux $TAG" \
+            --notes "kernel: $(cat /tmp/krel.txt)" \
+            --repo "${{ github.repository }}"
