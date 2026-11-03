@@ -219,6 +219,16 @@ jobs:
             done | sudo tee -a /mnt/root/etc/hosts
           done
           echo "chroot hosts:"; sudo tail -12 /mnt/root/etc/hosts
+          EFF=$(curl -sSL -o /dev/null -w '%{url_effective}' http://mirror.archlinuxarm.org/archlinuxarm/aarch64/core/core.db)
+          MHOST=$(echo "$EFF" | sed -E 's#^http://([^/]+).*#\1#')
+          echo "effective mirror host: $MHOST"
+          for ip in $(getent ahostsv4 "$MHOST" | awk '{print $1}' | sort -u); do
+            echo "$ip $MHOST"
+          done | sudo tee -a /mnt/root/etc/hosts
+          sudo bash -c "cat > /mnt/root/etc/pacman.d/mirrorlist <<'EOF'
+          Server = http://$MHOST/\$arch/\$repo
+          EOF"
+          sudo cat /mnt/root/etc/pacman.d/mirrorlist
           ls /mnt/root
 
       - name: Install packages in rootfs
@@ -227,11 +237,8 @@ jobs:
           cat > /tmp/setup.sh <<'SETUPEOF'
           #!/bin/bash
           set -eux
-          cat > /etc/pacman.d/mirrorlist <<'MIRROREOF'
-          Server = http://mirror.archlinuxarm.org/$arch/$repo
-          MIRROREOF
           echo "resolve check:"
-          getent hosts mirror.archlinuxarm.org || true
+          cat /etc/pacman.d/mirrorlist
           if pacman --disable-sandbox -V >/dev/null 2>&1; then
             PM="pacman --disable-sandbox"
           else
