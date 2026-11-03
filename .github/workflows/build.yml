@@ -62,7 +62,7 @@ jobs:
             -e RMI4_CORE -e RMI4_I2C \
             -e SCSI_UFS_QCOM -e SCSI_UFSHCD -e SCSI_UFSHCD_PLTFRM \
             -e EFI_PARTITION -e EXT4_FS \
-            -e SERIAL_MSM_GENI -e QCOM_GENI_SE \
+            -e SERIAL_QCOM_GENI -e SERIAL_QCOM_GENI_CONSOLE -e QCOM_GENI_SE \
             -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS -e USB_F_ECM \
             -e ANDROID_BINDERFS -e MODULES
           set -e
@@ -71,7 +71,7 @@ jobs:
           for s in CONFIG_DRM_MSM CONFIG_DRM_PANEL_JDI_FHD_R63452 CONFIG_DRM_FBDEV_EMULATION \
                    CONFIG_FRAMEBUFFER_CONSOLE CONFIG_RMI4_CORE CONFIG_RMI4_I2C \
                    CONFIG_SCSI_UFS_QCOM CONFIG_EFI_PARTITION CONFIG_EXT4_FS \
-                   CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_MSM_GENI CONFIG_USB_CONFIGFS \
+                   CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_QCOM_GENI CONFIG_USB_CONFIGFS \
                    CONFIG_ANDROID_BINDERFS CONFIG_MODULES; do
             printf '%-42s %s\n' "$s" "$(grep -E "^$s=" .config || echo MISSING)"
           done
@@ -171,8 +171,20 @@ jobs:
       - name: Download Arch rootfs tarball
         run: |
           set -eux
-          curl -fSL --retry 3 -o /tmp/arch.tar.gz "$ROOTFS_URL"
+          url=""
+          for u in \
+            http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz \
+            https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/os/ArchLinuxARM-aarch64-latest.tar.gz \
+            http://mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz; do
+            echo "trying $u"
+            if curl -fSL --retry 2 --connect-timeout 20 --max-time 1800 -o /tmp/arch.tar.gz "$u"; then
+              url="$u"; break
+            fi
+          done
+          test -n "$url"
+          echo "downloaded from $url"
           ls -lh /tmp/arch.tar.gz
+          tar -tzf /tmp/arch.tar.gz | head -3
 
       - name: Build ext4 rootfs image
         run: |
