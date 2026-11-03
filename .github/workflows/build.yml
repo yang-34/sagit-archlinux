@@ -168,9 +168,20 @@ jobs:
           path: out/
           retention-days: 30
 
+      - name: Cache arch tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/arch.tar.gz
+          key: archlinuxarm-aarch64-latest-20261103
+
       - name: Download Arch rootfs tarball
         run: |
           set -eux
+          if [ -s /tmp/arch.tar.gz ] && [ "$(stat -c%s /tmp/arch.tar.gz)" -gt 700000000 ]; then
+            echo "cached tarball, skip download"
+            tar -tzf /tmp/arch.tar.gz | head -3
+            exit 0
+          fi
           url=""
           for u in \
             http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz \
@@ -212,15 +223,17 @@ jobs:
           cat > /etc/pacman.d/mirrorlist <<'MIRROREOF'
           Server = http://mirror.archlinuxarm.org/$arch/$repo
           MIRROREOF
-          if pacman -V | grep -qE "^Pacman v7"; then
-            grep -q "^DisableSandbox" /etc/pacman.conf || sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf
+          if pacman --disable-sandbox -V >/dev/null 2>&1; then
+            PM="pacman --disable-sandbox"
+          else
+            PM="pacman"
           fi
-          if ! pacman -Sy --noconfirm; then
+          if ! $PM -Sy --noconfirm; then
             pacman-key --init
             pacman-key --populate archlinuxarm
-            pacman -Sy --noconfirm
+            $PM -Sy --noconfirm
           fi
-          pacman -S --noconfirm --needed openssh networkmanager wpa_supplicant iw \
+          $PM -S --noconfirm --needed openssh networkmanager wpa_supplicant iw \
             sudo vim nano htop git linux-firmware mesa weston seatd
           mkdir -p /etc/systemd/system/multi-user.target.wants
           ln -sf /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
