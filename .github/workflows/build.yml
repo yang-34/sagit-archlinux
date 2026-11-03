@@ -290,6 +290,7 @@ jobs:
         run: |
           set -eux
           sudo tar -xzf /tmp/modules.tar.gz -C /mnt/root/
+          sudo find /mnt/root/lib/modules -name '*.ko.xz' -exec xz -d {} \;
           sudo chroot /mnt/root /bin/bash -c 'DEP=$(ls /lib/modules | head -1); echo "modules: $DEP"; depmod -a "$DEP" || true'
 
       - name: Unmount rootfs
