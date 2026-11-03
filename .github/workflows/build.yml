@@ -121,11 +121,24 @@ jobs:
           mount -t devtmpfs devtmpfs /dev 2>/dev/null
           mount -t proc proc /proc
           mount -t sysfs sysfs /sys
+          find_root() {
+            for d in /dev/sd*[0-9]; do
+              [ -b "$d" ] || continue
+              mount -t ext4 -o ro "$d" /newroot 2>/dev/null || continue
+              if [ -f /newroot/etc/hostname ] && grep -q sagit /newroot/etc/hostname 2>/dev/null; then
+                umount /newroot
+                echo "$d"
+                return 0
+              fi
+              umount /newroot
+            done
+            return 1
+          }
           i=0
+          R=""
           while [ $i -lt 60 ]; do
-            R=$(blkid -L archroot 2>/dev/null)
+            R=$(find_root)
             [ -n "$R" ] && break
-            [ -b /dev/sda17 ] && { R=/dev/sda17; break; }
             i=$((i+1))
             sleep 1
           done
