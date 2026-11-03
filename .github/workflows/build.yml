@@ -245,7 +245,8 @@ jobs:
           pacman-key --init
           pacman-key --populate archlinuxarm
           $PM -Sy --noconfirm
-          $PM -S --noconfirm --needed openssh networkmanager wpa_supplicant iw \
+          $PM -S --noconfirm --needed --overwrite '/usr/lib/firmware/*' \
+            openssh networkmanager wpa_supplicant iw \
             sudo vim nano htop git linux-firmware mesa
           $PM -S --noconfirm --needed weston seatd || echo "optional packages skipped"
           mkdir -p /etc/systemd/system/multi-user.target.wants
