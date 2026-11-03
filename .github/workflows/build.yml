@@ -337,6 +337,7 @@ jobs:
           NMEOF
           chmod 600 /etc/NetworkManager/system-connections/usb0.nmconnection
 
+          mkdir -p /etc/dnsmasq.d
           cat > /etc/dnsmasq.d/usb0.conf <<'DNSEOF'
           interface=usb0
           bind-dynamic
