@@ -281,6 +281,69 @@ jobs:
           printf "root:root\n" | chpasswd
           echo "LABEL=archroot / ext4 defaults,noatime 0 1" > /etc/fstab
           echo sagit-archlinux > /etc/hostname
+
+          $PM -S --noconfirm --needed dnsmasq
+          cat > /usr/local/bin/usb-gadget.sh <<'GADGETEOF'
+          #!/bin/sh
+          set -e
+          mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+          G=/sys/kernel/config/usb_gadget/g1
+          [ -d "$G" ] && exit 0
+          mkdir -p "$G"
+          echo 0x1d6b > "$G/idVendor"
+          echo 0x0104 > "$G/idProduct"
+          mkdir -p "$G/strings/0x409"
+          echo sagit-archlinux > "$G/strings/0x409/serialnumber"
+          echo Xiaomi > "$G/strings/0x409/manufacturer"
+          echo Mi6-Arch > "$G/strings/0x409/product"
+          mkdir -p "$G/configs/c.1/strings/0x409"
+          echo rndis > "$G/configs/c.1/strings/0x409/configuration"
+          mkdir -p "$G/functions/rndis.usb0"
+          ln -sf "$G/functions/rndis.usb0" "$G/configs/c.1/rndis.usb0"
+          UDC=$(ls /sys/class/udc | head -1)
+          [ -n "$UDC" ] && echo "$UDC" > "$G/UDC"
+          GADGETEOF
+          chmod +x /usr/local/bin/usb-gadget.sh
+
+          cat > /etc/systemd/system/usb-gadget.service <<'UNITEOF'
+          [Unit]
+          Description=USB RNDIS network gadget
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/usb-gadget.sh
+
+          [Install]
+          WantedBy=multi-user.target
+          UNITEOF
+          ln -sf /etc/systemd/system/usb-gadget.service /etc/systemd/system/multi-user.target.wants/usb-gadget.service
+
+          mkdir -p /etc/NetworkManager/system-connections
+          cat > /etc/NetworkManager/system-connections/usb0.nmconnection <<'NMEOF'
+          [connection]
+          id=usb0
+          type=ethernet
+          interface-name=usb0
+          autoconnect=true
+
+          [ipv4]
+          method=manual
+          address1=192.168.42.1/24
+
+          [ipv6]
+          method=disabled
+          NMEOF
+          chmod 600 /etc/NetworkManager/system-connections/usb0.nmconnection
+
+          cat > /etc/dnsmasq.d/usb0.conf <<'DNSEOF'
+          interface=usb0
+          bind-dynamic
+          dhcp-range=192.168.42.10,192.168.42.20,255.255.255.0,12h
+          dhcp-option=3,192.168.42.1
+          DNSEOF
+          ln -sf /usr/lib/systemd/system/dnsmasq.service /etc/systemd/system/multi-user.target.wants/dnsmasq.service
           SETUPEOF
           sudo cp /tmp/setup.sh /mnt/root/setup.sh
           sudo chmod +x /mnt/root/setup.sh
