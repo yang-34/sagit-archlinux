@@ -89,7 +89,7 @@ jobs:
           make -s ARCH=$ARCH CROSS_COMPILE=$CROSS kernelrelease > /tmp/krel.txt
           cat /tmp/krel.txt
           rm -rf modroot
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS INSTALL_MOD_PATH="$PWD/modroot" modules_install
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS INSTALL_MOD_PATH="$PWD/modroot" INSTALL_MOD_STRIP=1 modules_install
           tar -czf /tmp/modules.tar.gz -C modroot lib/modules
           ls -lh Image.gz-dtb /tmp/modules.tar.gz
 
@@ -247,8 +247,7 @@ jobs:
           $PM -Sy --noconfirm
           $PM -S --noconfirm --needed \
             openssh networkmanager wpa_supplicant iw \
-            sudo vim nano htop git mesa
-          $PM -S --noconfirm --needed weston seatd || echo "optional packages skipped"
+            sudo nano htop
           rm -rf /var/cache/pacman/pkg/*
           if [ -d /usr/lib/firmware ]; then
             find /usr/lib/firmware -mindepth 1 -maxdepth 1 ! -name ath10k ! -name qcom -exec rm -rf {} +
