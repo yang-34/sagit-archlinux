@@ -211,6 +211,9 @@ jobs:
             cat > /etc/pacman.d/mirrorlist <<MIRROREOF
           Server = http://mirror.archlinuxarm.org/\$arch/\$repo
           MIRROREOF
+            if pacman -V | grep -qE '^Pacman v7'; then
+              grep -q '^DisableSandbox' /etc/pacman.conf || sed -i "/^\[options\]/a DisableSandbox" /etc/pacman.conf
+            fi
             pacman -Sy --noconfirm
             pacman -S --noconfirm --needed openssh networkmanager wpa_supplicant iw \
               sudo vim nano htop git linux-firmware mesa weston seatd
