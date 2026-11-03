@@ -135,6 +135,11 @@ jobs:
           mount --move /dev /newroot/dev
           mount --move /proc /newroot/proc
           mount --move /sys /newroot/sys
+          mkdir -p /newroot/dev/pts /newroot/dev/shm /newroot/run /newroot/sys/fs/cgroup
+          mount -t devpts devpts /newroot/dev/pts 2>/dev/null
+          mount -t tmpfs -o mode=1777,nosuid,nodev shm /newroot/dev/shm 2>/dev/null
+          mount -t tmpfs -o mode=0755,nosuid,nodev run /newroot/run 2>/dev/null
+          mount -t cgroup2 none /newroot/sys/fs/cgroup 2>/dev/null
           exec switch_root /newroot /sbin/init
           INITEOF
           chmod +x initramfs/init
@@ -154,7 +159,7 @@ jobs:
           secondaddr = 0x00F00000
           tagsaddr = 0x00000100
           name = sagit-archlinux
-          cmdline = console=ttyMSM0,115200n8 root=/dev/sda17 rw rootwait rootfstype=ext4 earlycon
+          cmdline = console=ttyMSM0,115200n8 root=/dev/sda17 rw rootwait rootfstype=ext4 earlycon panic=30
           CFGEOF
           abootimg --create /tmp/boot.img -f /tmp/bootimg.cfg -k Image.gz-dtb -r /tmp/initramfs.gz
           abootimg -i /tmp/boot.img
@@ -281,6 +286,7 @@ jobs:
           sudo umount -R /mnt/root || sudo umount -Rl /mnt/root || true
           mount | grep /mnt/root || true
           for d in $(losetup -j /tmp/rootfs.img | cut -d: -f1); do sudo losetup -d "$d" || true; done
+          sudo e2fsck -f -y /tmp/rootfs.img || true
           ls -lh /tmp/rootfs.img
           du -h /tmp/rootfs.img
 
