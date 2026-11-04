@@ -63,14 +63,16 @@ jobs:
             -e SCSI_UFS_QCOM -e SCSI_UFSHCD -e SCSI_UFSHCD_PLTFRM \
             -e EFI_PARTITION -e EXT4_FS \
             -e SERIAL_QCOM_GENI -e SERIAL_QCOM_GENI_CONSOLE -e QCOM_GENI_SE \
-            -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS -e USB_F_ECM \
+            -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS \
+            -e I2C_QUP -e RTC_DRV_PM8XXX -e BATTERY_QCOM_FG \
             -e ANDROID_BINDERFS -e MODULES
           set -e
           make ARCH=$ARCH CROSS_COMPILE=$CROSS olddefconfig
           echo "=== key symbols ==="
           for s in CONFIG_DRM_MSM CONFIG_DRM_PANEL_JDI_FHD_R63452 CONFIG_DRM_FBDEV_EMULATION \
-                   CONFIG_BACKLIGHT_QCOM_WLED CONFIG_I2C_QCOM_GENI CONFIG_INPUT_EVDEV \
+                   CONFIG_BACKLIGHT_QCOM_WLED CONFIG_I2C_QCOM_GENI CONFIG_I2C_QUP CONFIG_INPUT_EVDEV \
                    CONFIG_FRAMEBUFFER_CONSOLE CONFIG_RMI4_CORE CONFIG_RMI4_I2C \
+                   CONFIG_RTC_DRV_PM8XXX CONFIG_BATTERY_QCOM_FG \
                    CONFIG_SCSI_UFS_QCOM CONFIG_EFI_PARTITION CONFIG_EXT4_FS \
                    CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_QCOM_GENI CONFIG_USB_CONFIGFS \
                    CONFIG_ANDROID_BINDERFS CONFIG_MODULES; do
@@ -112,7 +114,8 @@ jobs:
           cp "$BB" initramfs/bin/busybox
           chmod +x initramfs/bin/busybox
           for a in sh mount umount blkid sleep switch_root mkdir cat ls echo dmesg mdev \
-                   reboot poweroff insmod modprobe ifconfig ip find grep; do
+                   reboot poweroff insmod modprobe ifconfig ip find grep \
+                   head ln chmod sed printf mountpoint; do
             ln -sf /bin/busybox initramfs/bin/$a
           done
           cat > initramfs/init <<'INITEOF'
@@ -145,6 +148,85 @@ jobs:
           echo "root device: ${R:-none}"
           [ -z "$R" ] && R=/dev/sda17
           mount -t ext4 -o rw,noatime "$R" /newroot || { echo "root mount failed"; exec sh; }
+
+          cat > /newroot/usr/local/bin/usb-gadget.sh <<'GADGETEOF'
+          #!/bin/sh
+          set -e
+          mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+          G=/sys/kernel/config/usb_gadget/g1
+          [ -s "$G/UDC" ] && exit 0
+          mkdir -p "$G"
+          echo 0x1d6b > "$G/idVendor"
+          echo 0x0105 > "$G/idProduct"
+          mkdir -p "$G/strings/0x409"
+          echo sagit-archlinux > "$G/strings/0x409/serialnumber"
+          echo Xiaomi > "$G/strings/0x409/manufacturer"
+          echo Mi6-Arch > "$G/strings/0x409/product"
+          mkdir -p "$G/configs/c.1/strings/0x409"
+          echo rndis > "$G/configs/c.1/strings/0x409/configuration"
+          mkdir -p "$G/functions/rndis.usb0"
+          ln -sf "$G/functions/rndis.usb0" "$G/configs/c.1/rndis.usb0"
+          echo 0xEF > "$G/bDeviceClass"
+          echo 0x02 > "$G/bDeviceSubClass"
+          echo 0x01 > "$G/bDeviceProtocol"
+          echo 1 > "$G/os_desc/use"
+          echo 0xcd > "$G/os_desc/b_vendor_code"
+          echo MSFT100 > "$G/os_desc/qw_sign"
+          mkdir -p "$G/functions/rndis.usb0/os_desc/interface.rndis"
+          echo RNDIS > "$G/functions/rndis.usb0/os_desc/interface.rndis/compatible_id"
+          echo 5162001 > "$G/functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id"
+          ln -sf "$G/configs/c.1" "$G/os_desc/c.1"
+          UDC=$(ls /sys/class/udc | grep . | head -1)
+          [ -n "$UDC" ] && echo "$UDC" > "$G/UDC"
+          GADGETEOF
+          chmod +x /newroot/usr/local/bin/usb-gadget.sh
+
+          mkdir -p /newroot/etc/systemd/system/multi-user.target.wants
+          ln -sf /etc/systemd/system/usb-gadget.service /newroot/etc/systemd/system/multi-user.target.wants/usb-gadget.service
+
+          CFG=/newroot/etc/ssh/sshd_config
+          sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' "$CFG" 2>/dev/null
+          grep -q '^PermitRootLogin' "$CFG" 2>/dev/null || echo 'PermitRootLogin yes' >> "$CFG"
+          sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "$CFG" 2>/dev/null
+          grep -q '^PasswordAuthentication' "$CFG" 2>/dev/null || echo 'PasswordAuthentication yes' >> "$CFG"
+          mkdir -p /newroot/etc/ssh/sshd_config.d
+          printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' > /newroot/etc/ssh/sshd_config.d/99-root.conf
+          chmod 644 /newroot/etc/ssh/sshd_config.d/99-root.conf
+
+          mkdir -p /sys/kernel/config
+          mount -t configfs none /sys/kernel/config 2>/dev/null
+          G=/sys/kernel/config/usb_gadget/g1
+          mkdir -p "$G"
+          echo 0x1d6b > "$G/idVendor"
+          echo 0x0105 > "$G/idProduct"
+          mkdir -p "$G/strings/0x409"
+          echo sagit-archlinux > "$G/strings/0x409/serialnumber"
+          echo Xiaomi > "$G/strings/0x409/manufacturer"
+          echo Mi6-Arch > "$G/strings/0x409/product"
+          mkdir -p "$G/configs/c.1/strings/0x409"
+          echo rndis > "$G/configs/c.1/strings/0x409/configuration"
+          mkdir -p "$G/functions/rndis.usb0"
+          ln -sf "$G/functions/rndis.usb0" "$G/configs/c.1/rndis.usb0"
+          echo 0xEF > "$G/bDeviceClass"
+          echo 0x02 > "$G/bDeviceSubClass"
+          echo 0x01 > "$G/bDeviceProtocol"
+          echo 1 > "$G/os_desc/use"
+          echo 0xcd > "$G/os_desc/b_vendor_code"
+          echo MSFT100 > "$G/os_desc/qw_sign"
+          mkdir -p "$G/functions/rndis.usb0/os_desc/interface.rndis"
+          echo RNDIS > "$G/functions/rndis.usb0/os_desc/interface.rndis/compatible_id"
+          echo 5162001 > "$G/functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id"
+          ln -sf "$G/configs/c.1" "$G/os_desc/c.1"
+          UDC=$(ls /sys/class/udc | grep . | head -1)
+          [ -n "$UDC" ] && echo "$UDC" > "$G/UDC"
+
+          i=0
+          while [ ! -e /sys/class/net/usb0 ] && [ $i -lt 20 ]; do
+            i=$((i+1))
+            sleep 1
+          done
+          ifconfig usb0 192.168.42.1 netmask 255.255.255.0 up 2>/dev/null
+
           mount --move /dev /newroot/dev
           mount --move /proc /newroot/proc
           mount --move /sys /newroot/sys
@@ -267,12 +349,15 @@ jobs:
           pacman-key --populate archlinuxarm
           $PM -Sy --noconfirm
           $PM -S --noconfirm --needed \
-            openssh networkmanager wpa_supplicant iw \
+            openssh networkmanager wpa_supplicant iw dnsmasq \
+            linux-firmware-qcom wireless-regdb \
             sudo vim nano htop git mesa
           $PM -S --noconfirm --needed weston seatd || echo "optional packages skipped"
           rm -rf /var/cache/pacman/pkg/*
           if [ -d /usr/lib/firmware ]; then
-            find /usr/lib/firmware -mindepth 1 -maxdepth 1 ! -name ath10k ! -name qcom -exec rm -rf {} +
+            find /usr/lib/firmware -mindepth 1 -maxdepth 1 \
+              ! -name ath10k ! -name qcom ! -name 'regulatory.db' ! -name 'regulatory.db.p7s' \
+              -exec rm -rf {} +
           fi
           echo "rootfs size:"; du -sh /usr /var 2>/dev/null || true
           mkdir -p /etc/systemd/system/multi-user.target.wants
@@ -282,16 +367,25 @@ jobs:
           echo "LABEL=archroot / ext4 defaults,noatime 0 1" > /etc/fstab
           echo sagit-archlinux > /etc/hostname
 
-          $PM -S --noconfirm --needed dnsmasq
+          mkdir -p /etc/ssh/sshd_config.d
+          printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' > /etc/ssh/sshd_config.d/99-root.conf
+          chmod 644 /etc/ssh/sshd_config.d/99-root.conf
+
+          mkdir -p /etc/NetworkManager/conf.d
+          cat > /etc/NetworkManager/conf.d/99-usb0-unmanaged.conf <<'NMEOF'
+          [keyfile]
+          unmanaged-devices=interface-name:usb0
+          NMEOF
+
           cat > /usr/local/bin/usb-gadget.sh <<'GADGETEOF'
           #!/bin/sh
           set -e
           mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
           G=/sys/kernel/config/usb_gadget/g1
-          [ -d "$G" ] && exit 0
+          [ -s "$G/UDC" ] && exit 0
           mkdir -p "$G"
           echo 0x1d6b > "$G/idVendor"
-          echo 0x0104 > "$G/idProduct"
+          echo 0x0105 > "$G/idProduct"
           mkdir -p "$G/strings/0x409"
           echo sagit-archlinux > "$G/strings/0x409/serialnumber"
           echo Xiaomi > "$G/strings/0x409/manufacturer"
@@ -300,15 +394,25 @@ jobs:
           echo rndis > "$G/configs/c.1/strings/0x409/configuration"
           mkdir -p "$G/functions/rndis.usb0"
           ln -sf "$G/functions/rndis.usb0" "$G/configs/c.1/rndis.usb0"
-          UDC=$(ls /sys/class/udc | head -1)
+          echo 0xEF > "$G/bDeviceClass"
+          echo 0x02 > "$G/bDeviceSubClass"
+          echo 0x01 > "$G/bDeviceProtocol"
+          echo 1 > "$G/os_desc/use"
+          echo 0xcd > "$G/os_desc/b_vendor_code"
+          echo MSFT100 > "$G/os_desc/qw_sign"
+          mkdir -p "$G/functions/rndis.usb0/os_desc/interface.rndis"
+          echo RNDIS > "$G/functions/rndis.usb0/os_desc/interface.rndis/compatible_id"
+          echo 5162001 > "$G/functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id"
+          ln -sf "$G/configs/c.1" "$G/os_desc/c.1"
+          UDC=$(ls /sys/class/udc | grep . | head -1)
           [ -n "$UDC" ] && echo "$UDC" > "$G/UDC"
           GADGETEOF
           chmod +x /usr/local/bin/usb-gadget.sh
 
           cat > /etc/systemd/system/usb-gadget.service <<'UNITEOF'
           [Unit]
-          Description=USB RNDIS network gadget
-          After=network.target
+          Description=USB RNDIS gadget fallback
+          After=local-fs.target
 
           [Service]
           Type=oneshot
@@ -320,31 +424,51 @@ jobs:
           UNITEOF
           ln -sf /etc/systemd/system/usb-gadget.service /etc/systemd/system/multi-user.target.wants/usb-gadget.service
 
-          mkdir -p /etc/NetworkManager/system-connections
-          cat > /etc/NetworkManager/system-connections/usb0.nmconnection <<'NMEOF'
-          [connection]
-          id=usb0
-          type=ethernet
-          interface-name=usb0
-          autoconnect=true
+          cat > /usr/local/bin/usb0-net.sh <<'USB0EOF'
+          #!/bin/sh
+          set -u
+          i=0
+          while [ ! -e /sys/class/net/usb0 ] && [ "$i" -lt 30 ]; do
+              sleep 1
+              i=$((i + 1))
+          done
+          [ -e /sys/class/net/usb0 ] || exit 0
 
-          [ipv4]
-          method=manual
-          address1=192.168.42.1/24
+          ip link set usb0 up 2>/dev/null || true
+          ip addr replace 192.168.42.1/24 dev usb0 2>/dev/null || true
 
-          [ipv6]
-          method=disabled
-          NMEOF
-          chmod 600 /etc/NetworkManager/system-connections/usb0.nmconnection
+          exec dnsmasq \
+              --keep-in-foreground \
+              --port=0 \
+              --interface=usb0 \
+              --bind-interfaces \
+              --dhcp-range=192.168.42.2,192.168.42.20,255.255.255.0,12h \
+              --dhcp-option=3,192.168.42.1 \
+              --dhcp-option=6,192.168.42.1 \
+              --dhcp-authoritative \
+              --no-hosts \
+              --no-resolv \
+              --leasefile-ro \
+              --pid-file=/run/usb0-dnsmasq.pid \
+              --log-facility=/var/log/usb0-dnsmasq.log
+          USB0EOF
+          chmod +x /usr/local/bin/usb0-net.sh
 
-          mkdir -p /etc/dnsmasq.d
-          cat > /etc/dnsmasq.d/usb0.conf <<'DNSEOF'
-          interface=usb0
-          bind-dynamic
-          dhcp-range=192.168.42.10,192.168.42.20,255.255.255.0,12h
-          dhcp-option=3,192.168.42.1
-          DNSEOF
-          ln -sf /usr/lib/systemd/system/dnsmasq.service /etc/systemd/system/multi-user.target.wants/dnsmasq.service
+          cat > /etc/systemd/system/usb0-net.service <<'UNITEOF2'
+          [Unit]
+          Description=usb0 static IP + DHCP for USB gadget SSH
+          After=multi-user.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/usb0-net.sh
+          Restart=on-failure
+          RestartSec=3
+
+          [Install]
+          WantedBy=multi-user.target
+          UNITEOF2
+          ln -sf /etc/systemd/system/usb0-net.service /etc/systemd/system/multi-user.target.wants/usb0-net.service
           SETUPEOF
           sudo cp /tmp/setup.sh /mnt/root/setup.sh
           sudo chmod +x /mnt/root/setup.sh
@@ -394,5 +518,8 @@ jobs:
             out/boot.img out/rootfs.simg.part* out/modules.tar.gz \
             --title "sagit archlinux $TAG" \
             --notes "kernel: $(cat /tmp/krel.txt)
+            fixes: touch(I2C_QUP builtin + RMI4), RTC(pm8xxx), battery(qcom_fg), GPU fw(a530), regulatory.db,
+            initramfs USB gadget+sshd drop-in, usb0 static IP+DHCP, gadget fallback service
+            known: WiFi needs WCNSS/QMI endpoint, audio needs ADSP firmware (both absent from this tree/fw)
             合并分片后刷入: cat rootfs.simg.part* > rootfs.simg (Windows: copy /b rootfs.simg.part00+rootfs.simg.part01 rootfs.simg)" \
             --repo "${{ github.repository }}"
