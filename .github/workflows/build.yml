@@ -48,6 +48,12 @@ jobs:
           git log -1 --oneline
           ls arch/arm64/configs/ | grep -i sagit
 
+      - name: Patch TFA9890 revision (Mi6 amp reports 0x88)
+        run: |
+          cd kernel
+          sed -i 's/#define TFA9890_REVISION[[:space:]]*0x80/#define TFA9890_REVISION 0x88/' sound/soc/codecs/tfa989x.c
+          grep -n 'TFA9890_REVISION' sound/soc/codecs/tfa989x.c | head
+
       - name: Configure kernel
         run: |
           cd kernel
