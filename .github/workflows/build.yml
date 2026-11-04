@@ -54,10 +54,10 @@ jobs:
           sed -i 's/#define TFA9890_REVISION[[:space:]]*0x80/#define TFA9890_REVISION 0x88/' sound/soc/codecs/tfa989x.c
           grep -n 'TFA9890_REVISION' sound/soc/codecs/tfa989x.c | head
 
-      - name: Patch sagit DT (vote VDDCX for GPUCC so GPU-CX/GX GDSCs can power up)
+      - name: Patch sagit DT (VDDCX on GPUCC; move GPU_GX GDSC from smmu to GPU node)
         run: |
           cd kernel
-          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
+          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n\n&adreno_smmu {\n\t/delete-property/ power-domains;\n};\n\n&adreno_gpu {\n\tpower-domains = <&gpucc GPU_GX_GDSC>, <&rpmpd MSM8998_VDDMX>;\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
           tail -8 arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
 
       - name: Configure kernel
@@ -67,7 +67,7 @@ jobs:
           set +e
           scripts/config --file .config \
             -e DEVTMPFS -e DEVTMPFS_MOUNT \
-            -e DRM -e DRM_MSM -e DRM_FBDEV_EMULATION -e DRM_PANEL_JDI_FHD_R63452 \
+            -e DRM -m DRM_MSM -e DRM_FBDEV_EMULATION -e DRM_PANEL_JDI_FHD_R63452 \
             -e FB -e FRAMEBUFFER_CONSOLE -e VT -e VT_CONSOLE \
             -e RMI4_CORE -e RMI4_I2C \
             -e I2C_QCOM_GENI -e INPUT_EVDEV \
@@ -252,9 +252,6 @@ jobs:
           exec switch_root /newroot /sbin/init
           INITEOF
           chmod +x initramfs/init
-          mkdir -p initramfs/lib/firmware/qcom
-          cp "$GITHUB_WORKSPACE"/fw/qcom/* initramfs/lib/firmware/qcom/
-          ls -l initramfs/lib/firmware/qcom
           cd initramfs
           find . | cpio -o -H newc 2>/dev/null | gzip -9 > /tmp/initramfs.gz
           ls -lh /tmp/initramfs.gz
