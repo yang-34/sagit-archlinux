@@ -48,6 +48,12 @@ jobs:
           git log -1 --oneline
           ls arch/arm64/configs/ | grep -i sagit
 
+      - name: Install extra firmware into kernel tree
+        run: |
+          mkdir -p kernel/firmware/qcom
+          cp fw/qcom/* kernel/firmware/qcom/
+          ls -l kernel/firmware/qcom
+
       - name: Patch TFA9890 revision (Mi6 amp reports 0x88)
         run: |
           cd kernel
@@ -71,6 +77,8 @@ jobs:
             -e SERIAL_QCOM_GENI -e SERIAL_QCOM_GENI_CONSOLE -e QCOM_GENI_SE \
             -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS \
             -e I2C_QUP -e RTC_DRV_PM8XXX -e RTC_HCTOSYS -e BATTERY_QCOM_FG \
+            --set-str EXTRA_FIRMWARE "qcom/a530_pm4.fw qcom/a530_pfp.fw qcom/a540_gpmu.fw2 qcom/a540_zap.mdt qcom/a540_zap.b00 qcom/a540_zap.b01 qcom/a540_zap.b02 qcom/a540_zap.elf" \
+            --set-str EXTRA_FIRMWARE_DIR "firmware" \
             -m SND_SOC_TFA989X \
             -e ANDROID_BINDERFS -e MODULES
           set -e
@@ -80,7 +88,7 @@ jobs:
                    CONFIG_BACKLIGHT_QCOM_WLED CONFIG_I2C_QCOM_GENI CONFIG_I2C_QUP CONFIG_INPUT_EVDEV \
                    CONFIG_FRAMEBUFFER_CONSOLE CONFIG_RMI4_CORE CONFIG_RMI4_I2C \
                    CONFIG_RTC_DRV_PM8XXX CONFIG_RTC_HCTOSYS CONFIG_BATTERY_QCOM_FG \
-                   CONFIG_SND_SOC_TFA989X \
+                   CONFIG_SND_SOC_TFA989X CONFIG_EXTRA_FIRMWARE \
                    CONFIG_SCSI_UFS_QCOM CONFIG_EFI_PARTITION CONFIG_EXT4_FS \
                    CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_QCOM_GENI CONFIG_USB_CONFIGFS \
                    CONFIG_ANDROID_BINDERFS CONFIG_MODULES; do
