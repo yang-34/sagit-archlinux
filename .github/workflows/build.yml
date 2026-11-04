@@ -57,14 +57,8 @@ jobs:
       - name: Patch sagit DT (vote VDDCX for GPUCC so GPU-CX/GX GDSCs can power up)
         run: |
           cd kernel
-          cat >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts <<'DTS_EOF'
-
-/* sagit: GPUCC lives in the CX rail; hold VDDCX on so GPU-CX/GX GDSCs can collapse off */
-&gpucc {
-	power-domains = <&rpmpd MSM8998_VDDCX>;
-};
-DTS_EOF
-          tail -12 arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
+          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
+          tail -8 arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
 
       - name: Configure kernel
         run: |
