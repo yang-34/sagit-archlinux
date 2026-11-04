@@ -54,10 +54,15 @@ jobs:
           sed -i 's/#define TFA9890_REVISION[[:space:]]*0x80/#define TFA9890_REVISION 0x88/' sound/soc/codecs/tfa989x.c
           grep -n 'TFA9890_REVISION' sound/soc/codecs/tfa989x.c | head
 
-      - name: Patch sagit DT (VDDCX on GPUCC; move GPU_GX GDSC from smmu to GPU node)
+      - name: Patch GCC GPU clock halt checks (match mainline BRANCH_HALT_SKIP)
+        run: |
+          python3 scripts/patch_gcc.py kernel
+          grep -n 'BRANCH_HALT_SKIP' kernel/drivers/clk/qcom/gcc-msm8998.c | head
+
+      - name: Patch sagit DT (vote VDDCX for GPUCC)
         run: |
           cd kernel
-          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n\n&adreno_smmu {\n\t/delete-property/ power-domains;\n};\n\n&adreno_gpu {\n\tpower-domains = <&gpucc GPU_GX_GDSC>, <&rpmpd MSM8998_VDDMX>;\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
+          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
           tail -8 arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
 
       - name: Configure kernel
