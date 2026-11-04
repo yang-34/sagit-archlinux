@@ -67,7 +67,7 @@ jobs:
           set +e
           scripts/config --file .config \
             -e DEVTMPFS -e DEVTMPFS_MOUNT \
-            -e DRM -m DRM_MSM -e DRM_FBDEV_EMULATION -e DRM_PANEL_JDI_FHD_R63452 \
+            -e DRM -e DRM_MSM -e DRM_FBDEV_EMULATION -e DRM_PANEL_JDI_FHD_R63452 \
             -e FB -e FRAMEBUFFER_CONSOLE -e VT -e VT_CONSOLE \
             -e RMI4_CORE -e RMI4_I2C \
             -e I2C_QCOM_GENI -e INPUT_EVDEV \
@@ -78,7 +78,6 @@ jobs:
             -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS \
             -e I2C_QUP -e RTC_DRV_PM8XXX -e RTC_HCTOSYS -e BATTERY_QCOM_FG \
             -m SND_SOC_TFA989X \
-            --set-str CMDLINE "clk_ignore_unused" \
             -e ANDROID_BINDERFS -e MODULES
           set -e
           make ARCH=$ARCH CROSS_COMPILE=$CROSS olddefconfig
@@ -253,6 +252,9 @@ jobs:
           exec switch_root /newroot /sbin/init
           INITEOF
           chmod +x initramfs/init
+          mkdir -p initramfs/lib/firmware/qcom
+          cp "$GITHUB_WORKSPACE"/fw/qcom/* initramfs/lib/firmware/qcom/
+          ls -l initramfs/lib/firmware/qcom
           cd initramfs
           find . | cpio -o -H newc 2>/dev/null | gzip -9 > /tmp/initramfs.gz
           ls -lh /tmp/initramfs.gz
