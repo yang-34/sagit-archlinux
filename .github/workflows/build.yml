@@ -59,10 +59,15 @@ jobs:
           python3 scripts/patch_gcc.py kernel
           grep -n 'BRANCH_HALT_SKIP' kernel/drivers/clk/qcom/gcc-msm8998.c | head
 
+      - name: Patch a5xx SECVID write (build-38 diagnostic)
+        run: |
+          python3 scripts/patch_a5xx.py kernel
+          grep -n 'build-38 diagnostic' kernel/drivers/gpu/drm/msm/adreno/a5xx_gpu.c
+
       - name: Patch sagit DT (vote VDDCX for GPUCC, add zap-shader node)
         run: |
           cd kernel
-          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n\n&adreno_smmu {\n\tpower-domains = <&rpmpd MSM8998_VDDMX>;\n};\n\n&adreno_gpu {\n\tpower-domains = <&gpucc GPU_GX_GDSC>;\n\n\tzap-shader {\n\t\tmemory-region = <&zap_shader_region>;\n\t};\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
+          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n\n&adreno_gpu {\n\tzap-shader {\n\t\tmemory-region = <&zap_shader_region>;\n\t};\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
           tail -14 arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
 
       - name: Configure kernel
