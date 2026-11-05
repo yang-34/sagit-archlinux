@@ -58,8 +58,8 @@ jobs:
         run: |
           cd kernel
           python3 "$GITHUB_WORKSPACE/scripts/patch_bisect.py" .
-          grep -rn 'BISECT: stage' drivers/gpu/drm/msm/adreno/ | head -8
-          grep -n 'module_param_named(debug_stage' drivers/gpu/drm/msm/adreno/adreno_device.c
+          grep -rn 'BISECT: stage' drivers/gpu/drm/msm/adreno/ | head -8 || true
+          grep -n 'module_param_named(debug_stage' drivers/gpu/drm/msm/adreno/adreno_device.c || true
 
       - name: Patch sagit DT (vote VDDCX for GPUCC, add zap-shader node)
         run: |
