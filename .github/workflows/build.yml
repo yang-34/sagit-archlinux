@@ -75,7 +75,7 @@ jobs:
           PYEOF
           grep -n -B2 -A2 'BISECT: let GPU GX' drivers/iommu/arm/arm-smmu/arm-smmu.c
 
-      - name: Patch GPU BIMC source clock critical (keep src gate on)
+      - name: Patch GPU BIMC source clock ignore-unused (keep firmware state)
         run: |
           cd kernel
           python3 - <<'PYEOF'
@@ -83,7 +83,7 @@ jobs:
           s = open(p).read()
           old = '\t\t\t.name = "gcc_gpu_bimc_gfx_src_clk",\n'
           assert s.count(old) == 1, s.count(old)
-          s = s.replace(old, old + '\t\t\t.flags = CLK_IS_CRITICAL,\n')
+          s = s.replace(old, old + '\t\t\t.flags = CLK_IGNORE_UNUSED,\n')
           open(p, "w").write(s)
           print("gpu bimc src clock marked critical")
           PYEOF
