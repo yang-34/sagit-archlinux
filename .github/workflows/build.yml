@@ -54,20 +54,12 @@ jobs:
           sed -i 's/#define TFA9890_REVISION[[:space:]]*0x80/#define TFA9890_REVISION 0x88/' sound/soc/codecs/tfa989x.c
           grep -n 'TFA9890_REVISION' sound/soc/codecs/tfa989x.c | head
 
-      - name: Patch GCC GPU clock halt checks (match mainline BRANCH_HALT_SKIP)
-        run: |
-          python3 scripts/patch_gcc.py kernel
-          grep -n 'BRANCH_HALT_SKIP' kernel/drivers/clk/qcom/gcc-msm8998.c | head
-
-      - name: Patch a5xx SECVID write (build-38 diagnostic)
-        run: |
-          python3 scripts/patch_a5xx.py kernel
-          grep -n 'build-38 diagnostic' kernel/drivers/gpu/drm/msm/adreno/a5xx_gpu.c
-
-      - name: Instrument GPU init checkpoints (pstore forensics)
+      - name: Patch GPU bring-up bisect stages (module param debug_stage)
         run: |
           cd kernel
-          python3 "$GITHUB_WORKSPACE/scripts/instrument_ckpt.py"
+          python3 "$GITHUB_WORKSPACE/scripts/patch_bisect.py" .
+          grep -rn 'BISECT: stage' drivers/gpu/drm/msm/adreno/ | head -8
+          grep -n 'module_param_named(debug_stage' drivers/gpu/drm/msm/adreno/adreno_device.c
 
       - name: Patch sagit DT (vote VDDCX for GPUCC, add zap-shader node)
         run: |
