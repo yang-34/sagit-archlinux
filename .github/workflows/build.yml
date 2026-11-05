@@ -67,7 +67,7 @@ jobs:
       - name: Patch sagit DT (vote VDDCX for GPUCC, add zap-shader node)
         run: |
           cd kernel
-          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n\n&adreno_gpu {\n\tzap-shader {\n\t\tmemory-region = <&zap_shader_region>;\n\t};\n};\n\n/ {\n\tramoops@f7000000 {\n\t\tcompatible = "ramoops";\n\t\treg = <0x0 0xf7000000 0x0 0x40000>;\n\t\trecord-size = <0x10000>;\n\t\tconsole-size = <0x20000>;\n\t\tpmsg-size = <0x10000>;\n\t};\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
+          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n\n&adreno_gpu {\n\tstatus = "disabled";\n\n\tzap-shader {\n\t\tmemory-region = <&zap_shader_region>;\n\t};\n};\n\n/ {\n\tramoops@f7000000 {\n\t\tcompatible = "ramoops";\n\t\treg = <0x0 0xf7000000 0x0 0x40000>;\n\t\trecord-size = <0x10000>;\n\t\tconsole-size = <0x20000>;\n\t\tpmsg-size = <0x10000>;\n\t};\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
           tail -14 arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
 
       - name: Configure kernel
@@ -98,6 +98,7 @@ jobs:
                    CONFIG_FRAMEBUFFER_CONSOLE CONFIG_RMI4_CORE CONFIG_RMI4_I2C \
                    CONFIG_RTC_DRV_PM8XXX CONFIG_RTC_HCTOSYS CONFIG_BATTERY_QCOM_FG \
                    CONFIG_SND_SOC_TFA989X CONFIG_EXTRA_FIRMWARE CONFIG_FW_LOADER CONFIG_CMDLINE \
+                   CONFIG_PSTORE CONFIG_PSTORE_RAM \
                    CONFIG_SCSI_UFS_QCOM CONFIG_EFI_PARTITION CONFIG_EXT4_FS \
                    CONFIG_DEVTMPFS_MOUNT CONFIG_SERIAL_QCOM_GENI CONFIG_USB_CONFIGFS \
                    CONFIG_ANDROID_BINDERFS CONFIG_MODULES; do
