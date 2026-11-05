@@ -20,7 +20,7 @@ TARGETS = [
     ("drivers/gpu/drm/msm/adreno/a5xx_gpu.c", r"int a5xx_power_init\s*\(", "a5xx_power_init"),
 ]
 
-STOP_AFTER = {"adreno_bind": "\treturn -ENODEV;\n"}
+STOP_AFTER = {}
 
 
 def add_include(src):
