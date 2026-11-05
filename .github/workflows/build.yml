@@ -54,20 +54,26 @@ jobs:
           sed -i 's/#define TFA9890_REVISION[[:space:]]*0x80/#define TFA9890_REVISION 0x88/' sound/soc/codecs/tfa989x.c
           grep -n 'TFA9890_REVISION' sound/soc/codecs/tfa989x.c | head
 
-      - name: Patch GCC GPU clock halt checks (match mainline BRANCH_HALT_SKIP)
-        run: |
-          python3 scripts/patch_gcc.py kernel
-          grep -n 'BRANCH_HALT_SKIP' kernel/drivers/clk/qcom/gcc-msm8998.c | head
-
-      - name: Patch a5xx SECVID write (build-38 diagnostic)
-        run: |
-          python3 scripts/patch_a5xx.py kernel
-          grep -n 'build-38 diagnostic' kernel/drivers/gpu/drm/msm/adreno/a5xx_gpu.c
-
-      - name: Patch sagit DT (vote VDDCX for GPUCC, add zap-shader node)
+      - name: Patch GPU bring-up bisect gates (module param debug_stage bitmask)
         run: |
           cd kernel
-          printf '\n&gpucc {\n\tpower-domains = <&rpmpd MSM8998_VDDCX>;\n};\n\n&adreno_gpu {\n\tstatus = "disabled";\n\n\tzap-shader {\n\t\tmemory-region = <&zap_shader_region>;\n\t};\n};\n\n/ {\n\tramoops@f7000000 {\n\t\tcompatible = "ramoops";\n\t\treg = <0x0 0xf7000000 0x0 0x40000>;\n\t\trecord-size = <0x10000>;\n\t\tconsole-size = <0x20000>;\n\t\tpmsg-size = <0x10000>;\n\t};\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
+          python3 "$GITHUB_WORKSPACE/scripts/patch_bisect.py" .
+          grep -rn 'BISECT: bit' drivers/gpu/drm/msm/adreno/ | head -12 || true
+          grep -n 'module_param_named(debug_stage' drivers/gpu/drm/msm/adreno/adreno_device.c || true
+
+      - name: Patch GPU/BIMC clock halt checks (match upstream HALT_SKIP)
+        run: |
+          cd kernel
+          for c in gcc_bimc_gfx_clk gcc_gpu_bimc_gfx_clk gcc_gpu_cfg_ahb_clk; do
+            sed -i "/static struct clk_branch $c = {/,/^};/ s/\.halt_check = BRANCH_HALT,/.halt_check = BRANCH_HALT_SKIP,/" drivers/clk/qcom/gcc-msm8998.c
+          done
+          grep -n -A3 'gcc_gpu_bimc_gfx_clk = {' drivers/clk/qcom/gcc-msm8998.c
+          grep -n -A3 'gcc_gpu_cfg_ahb_clk = {' drivers/clk/qcom/gcc-msm8998.c
+
+      - name: Patch sagit DT (add ramoops region)
+        run: |
+          cd kernel
+          printf '\n/ {\n\tramoops@f7000000 {\n\t\tcompatible = "ramoops";\n\t\treg = <0x0 0xf7000000 0x0 0x40000>;\n\t\trecord-size = <0x10000>;\n\t\tconsole-size = <0x20000>;\n\t\tpmsg-size = <0x10000>;\n\t};\n};\n' >> arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
           tail -14 arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dts
 
       - name: Configure kernel
