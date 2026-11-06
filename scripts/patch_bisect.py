@@ -115,12 +115,26 @@ def main():
                gate(8, "bit8 before a5xx_power_init", "0"))
     a5 = apply(a5, "BISECT: bit9", insert_before, r"\n\tret = a5xx_zap_shader_init\(gpu\);",
                gate(9, "bit9 before zap shader init", "0"))
+
+    if "BISECT: bit10" not in a5:
+        old = "\t\ta5xx_gpmu_ucode_init(gpu);\n"
+        if a5.count(old) == 1:
+            a5 = a5.replace(old,
+                            '\t\tif (adreno_debug_stage & (1 << 10)) {\n'
+                            '\t\t\tpr_err("BISECT: bit10 skip gpmu ucode init\\n");\n'
+                            '\t\t} else {\n'
+                            '\t\t\ta5xx_gpmu_ucode_init(gpu);\n'
+                            '\t\t}\n')
+            print("OK      BISECT: bit10")
+        else:
+            print("MISS    BISECT: bit10")
     write(A5, a5)
 
     checks = {
         "param": "module_param_named(debug_stage" in read(DEV),
         "bits0-4": all(("BISECT: bit%d" % i) in read(DEV) for i in range(5)),
         "bits5-9": all(("BISECT: bit%d" % i) in read(A5) for i in range(5, 10)),
+        "bit10": "BISECT: bit10" in read(A5),
         "extern": "extern int adreno_debug_stage;" in read(HDR),
     }
     for name, ok in checks.items():

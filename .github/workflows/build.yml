@@ -61,6 +61,46 @@ jobs:
           grep -rn 'BISECT: bit' drivers/gpu/drm/msm/adreno/ | head -12 || true
           grep -n 'module_param_named(debug_stage' drivers/gpu/drm/msm/adreno/adreno_device.c || true
 
+      - name: Patch Adreno SMMU split pagetables (restore upstream msm8998 no-TTBR1 rule)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          p = "drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c"
+          s = open(p).read()
+          anchor = "static bool qcom_adreno_can_do_ttbr1(struct arm_smmu_device *smmu)"
+          assert s.count(anchor) == 1
+          i = s.index(anchor)
+          j = s.index("\treturn true;", i)
+          inject = ('\tif (of_device_is_compatible(np, "qcom,msm8996-smmu-v2") ||\n'
+                    '\t    of_device_is_compatible(np, "qcom,msm8998-smmu-v2") ||\n'
+                    '\t    of_device_is_compatible(np, "qcom,sdm630-smmu-v2"))\n'
+                    '\t\treturn false;\n\n')
+          s = s[:j] + inject + s[j:]
+          open(p, "w").write(s)
+          print("ttbr1 rule restored")
+          PYEOF
+          sed -n '/qcom_adreno_can_do_ttbr1/,/^}/p' drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
+
+      - name: Patch a5xx recovery (power-cycle GPU before SW reset)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          p = "drivers/gpu/drm/msm/adreno/a5xx_gpu.c"
+          s = open(p).read()
+          old = "\tgpu_write(gpu, REG_A5XX_RBBM_SW_RESET_CMD, 1);\n"
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old,
+                        "\t/* BISECT: power-cycle the GPU so the CP returns in a known state */\n"
+                        "\tpm_runtime_force_suspend(&gpu->pdev->dev);\n"
+                        "\tpm_runtime_force_resume(&gpu->pdev->dev);\n\n" + old)
+          if "#include <linux/pm_runtime.h>" not in s:
+              s = s.replace('#include "a5xx_gpu.h"',
+                            '#include <linux/pm_runtime.h>\n\n#include "a5xx_gpu.h"', 1)
+          open(p, "w").write(s)
+          print("a5xx recover power-cycle patched")
+          PYEOF
+          grep -n -B3 'RBBM_SW_RESET_CMD, 1' drivers/gpu/drm/msm/adreno/a5xx_gpu.c | head -12
+
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
           cd kernel
