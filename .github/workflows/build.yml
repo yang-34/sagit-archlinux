@@ -202,6 +202,53 @@ jobs:
           PYEOF
           grep -n -A2 'jdi_fhd_r63452_mode = {' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
+      - name: Program PHY byte clock last at 30Hz mode (build-69)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          p = "drivers/gpu/drm/msm/dsi/dsi_host.c"
+          t = open(p).read()
+          decl_old = ('int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)\n'
+                      '{\n'
+                      '\tu32 byte_intf_rate;\n'
+                      '\tint ret;\n')
+          assert t.count(decl_old) == 1, t.count(decl_old)
+          t = t.replace(decl_old, decl_old.replace('\tint ret;\n',
+                                                   '\tint ret;\n'
+                                                   '\tstruct clk *byte_pll_clk;\n'), 1)
+          anchor = ('\t\tret = clk_set_rate(msm_host->byte_intf_clk, byte_intf_rate);\n'
+                    '\t\tif (ret) {\n'
+                    '\t\t\tpr_err("%s: Failed to set rate byte intf clk, %d\\n",\n'
+                    '\t\t\t       __func__, ret);\n'
+                    '\t\t\treturn ret;\n'
+                    '\t\t}\n'
+                    '\t}\n'
+                    '\n'
+                    '\treturn 0;\n'
+                    '}\n')
+          assert t.count(anchor) == 1, t.count(anchor)
+          add = ('\t}\n'
+                 '\n'
+                 '\t/* byte_intf shares the mmcc byte RCG; program the PHY byte\n'
+                 '\t * clock last so the PLL out-divider matches the mode. */\n'
+                 '\tbyte_pll_clk = clk_get_parent(msm_host->byte_clk_src);\n'
+                 '\tif (!IS_ERR_OR_NULL(byte_pll_clk)) {\n'
+                 '\t\tret = clk_set_rate(byte_pll_clk, msm_host->byte_clk_rate);\n'
+                 '\t\tif (ret)\n'
+                 '\t\t\tpr_err("%s: Failed to set PHY byte clk, %d\\n", __func__, ret);\n'
+                 '\t\tpr_info("dsi_clk: req=%u byte=%lu pll=%lu\\n",\n'
+                 '\t\t\tmsm_host->byte_clk_rate, clk_get_rate(msm_host->byte_clk),\n'
+                 '\t\t\tclk_get_rate(byte_pll_clk));\n'
+                 '\t}\n'
+                 '\n'
+                 '\treturn 0;\n'
+                 '}\n')
+          t = t.replace(anchor, add, 1)
+          open(p, "w").write(t)
+          print("PHY byte clock set last")
+          PYEOF
+          grep -n -A10 'byte_pll_clk = clk_get_parent' drivers/gpu/drm/msm/dsi/dsi_host.c
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
