@@ -130,6 +130,21 @@ jobs:
           grep -n 'dsi_mgr_mode_set' drivers/gpu/drm/msm/dsi/dsi_manager.c
           grep -n -A4 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
+      - name: Patch panel to continuous video clock (build-60)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          p = "drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c"
+          s = open(p).read()
+          old = ('\tdsi->mode_flags = MIPI_DSI_MODE_VIDEO_BURST |\n'
+                 '\t\t\t  MIPI_DSI_CLOCK_NON_CONTINUOUS;\n')
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, '\tdsi->mode_flags = MIPI_DSI_MODE_VIDEO_BURST;\n', 1)
+          open(p, "w").write(s)
+          print("continuous video clock")
+          PYEOF
+          grep -n -A2 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
+
       - name: Fix DSI byte clock rate last in the rate sequence (build-58)
         run: |
           cd kernel
