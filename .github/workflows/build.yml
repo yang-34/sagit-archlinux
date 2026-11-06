@@ -188,6 +188,20 @@ jobs:
           PYEOF
           grep -n -A3 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
+      - name: Set panel mode to 1080x1920@30 (build-68)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          p = "drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c"
+          s = open(p).read()
+          old = '\t.clock = (1080 + 120 + 16 + 40) * (1920 + 4 + 2 + 4) * 60 / 1000,\n'
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, '\t.clock = (1080 + 120 + 16 + 40) * (1920 + 4 + 2 + 4) * 30 / 1000,\n', 1)
+          open(p, "w").write(s)
+          print("panel mode 30Hz so pclk 72722 -> byteclk 54.54 matches the /4 PLL")
+          PYEOF
+          grep -n -A2 'jdi_fhd_r63452_mode = {' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
