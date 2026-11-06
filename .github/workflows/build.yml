@@ -170,7 +170,7 @@ jobs:
           grep -n 'dsi_mgr_mode_set' drivers/gpu/drm/msm/dsi/dsi_manager.c
           grep -n -A4 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
-      - name: Enable DSI video mode with full-rate byte clock (build-66)
+      - name: Enable DSI video mode at the bootloader /4 PLL rate (build-67)
         run: |
           cd kernel
           python3 - <<'PYEOF'
@@ -183,51 +183,10 @@ jobs:
                  '\t\t\t  MIPI_DSI_MODE_VIDEO_BURST |\n'
                  '\t\t\t  MIPI_DSI_CLOCK_NON_CONTINUOUS;\n')
           s = s.replace(old, new, 1)
-
-          p2 = "drivers/gpu/drm/msm/dsi/dsi_host.c"
-          t = open(p2).read()
-          decl_old = ('int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)\n'
-                      '{\n'
-                      '\tu32 byte_intf_rate;\n'
-                      '\tint ret;\n')
-          assert t.count(decl_old) == 1, t.count(decl_old)
-          t = t.replace(decl_old, decl_old.replace('\tint ret;\n',
-                                                   '\tint ret;\n'
-                                                   '\tstruct clk *byte_pll_clk;\n'), 1)
-          anchor = ('\t\tret = clk_set_rate(msm_host->byte_intf_clk, byte_intf_rate);\n'
-                    '\t\tif (ret) {\n'
-                    '\t\t\tpr_err("%s: Failed to set rate byte intf clk, %d\\n",\n'
-                    '\t\t\t       __func__, ret);\n'
-                    '\t\t\treturn ret;\n'
-                    '\t\t}\n'
-                    '\t}\n'
-                    '\n'
-                    '\treturn 0;\n'
-                    '}\n')
-          assert t.count(anchor) == 1, t.count(anchor)
-          add = ('\t}\n'
-                 '\n'
-                 '\t/* byte_intf shares the mmcc byte RCG; program the PHY byte\n'
-                 '\t * clock last so the PLL out-divider ends at the full rate. */\n'
-                 '\tbyte_pll_clk = clk_get_parent(msm_host->byte_clk_src);\n'
-                 '\tif (!IS_ERR_OR_NULL(byte_pll_clk)) {\n'
-                 '\t\tret = clk_set_rate(byte_pll_clk, msm_host->byte_clk_rate);\n'
-                 '\t\tif (ret)\n'
-                 '\t\t\tpr_err("%s: Failed to set PHY byte clk, %d\\n", __func__, ret);\n'
-                 '\t\tpr_info("dsi_clk: req=%u byte=%lu pll=%lu\\n",\n'
-                 '\t\t\tmsm_host->byte_clk_rate, clk_get_rate(msm_host->byte_clk),\n'
-                 '\t\t\tclk_get_rate(byte_pll_clk));\n'
-                 '\t}\n'
-                 '\n'
-                 '\treturn 0;\n'
-                 '}\n')
-          t = t.replace(anchor, add, 1)
-          open(p2, "w").write(t)
           open(p, "w").write(s)
-          print("video mode + full-rate byte clock")
+          print("video mode kept at the bootloader PLL outdiv (/4)")
           PYEOF
           grep -n -A3 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
-          grep -n -A12 'byte_pll_clk = clk_get_parent' drivers/gpu/drm/msm/dsi/dsi_host.c
 
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
