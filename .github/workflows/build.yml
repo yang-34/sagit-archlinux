@@ -61,6 +61,34 @@ jobs:
           grep -rn 'BISECT: bit' drivers/gpu/drm/msm/adreno/ | head -12 || true
           grep -n 'module_param_named(debug_stage' drivers/gpu/drm/msm/adreno/adreno_device.c || true
 
+      - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          import re
+          p = "drivers/gpu/drm/msm/adreno/a5xx_gpu.c"
+          s = open(p).read()
+          pat = (r"static struct msm_gem_address_space \*\n"
+                 r"a5xx_create_private_address_space\(struct msm_gpu \*gpu\)\n\{.*?\n\}\n")
+          m = re.search(pat, s, re.S)
+          assert m, "function not found"
+          body = ('static struct msm_gem_address_space *\n'
+                  'a5xx_create_private_address_space(struct msm_gpu *gpu)\n'
+                  '{\n'
+                  '\t/*\n'
+                  '\t * Per-process (TTBR0) pagetables are not usable on this msm8998\n'
+                  '\t * SMMU/firmware configuration: the CP faults at an unmapped iova\n'
+                  '\t * as soon as a context is torn down (observed iova=0xb7000).\n'
+                  '\t * Fall back to the single global GPU address space.\n'
+                  '\t */\n'
+                  '\treturn ERR_PTR(-ENODEV);\n'
+                  '}\n')
+          s = s[:m.start()] + body + s[m.end():]
+          open(p, "w").write(s)
+          print("per-process aspace disabled")
+          PYEOF
+          sed -n '/a5xx_create_private_address_space/,/^}/p' drivers/gpu/drm/msm/adreno/a5xx_gpu.c
+
       - name: Patch a5xx recovery (halt CP + power-cycle GPU before SW reset)
         run: |
           cd kernel
@@ -211,7 +239,7 @@ jobs:
           }
           i=0
           R=""
-          while [ $i -lt 60 ]; do
+          while [ $i -lt 180 ]; do
             R=$(find_root)
             [ -n "$R" ] && break
             i=$((i+1))
@@ -219,7 +247,14 @@ jobs:
           done
           echo "root device: ${R:-none}"
           [ -z "$R" ] && R=/dev/sda17
-          mount -t ext4 -o rw,noatime "$R" /newroot || { echo "root mount failed"; exec sh; }
+          mount -t ext4 -o rw,noatime "$R" /newroot || {
+            echo "root mount failed"
+            sleep 3
+            echo b > /proc/sysrq-trigger 2>/dev/null
+            sleep 3
+            reboot -f 2>/dev/null
+            exec sh
+          }
 
           cat > /newroot/usr/local/bin/usb-gadget.sh <<'GADGETEOF'
           #!/bin/sh
