@@ -170,7 +170,7 @@ jobs:
           grep -n 'dsi_mgr_mode_set' drivers/gpu/drm/msm/dsi/dsi_manager.c
           grep -n -A4 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
-      - name: Reorder panel power-on: sleep out then display on (build-64)
+      - name: Reorder panel power-on (sleep out then display on, build-64)
         run: |
           cd kernel
           python3 - <<'PYEOF'
