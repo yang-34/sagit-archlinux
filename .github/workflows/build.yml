@@ -61,6 +61,81 @@ jobs:
           grep -rn 'BISECT: bit' drivers/gpu/drm/msm/adreno/ | head -12 || true
           grep -n 'module_param_named(debug_stage' drivers/gpu/drm/msm/adreno/adreno_device.c || true
 
+      - name: Patch DSI clock diagnostics + non-burst video mode (build-55)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:70])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          # 1) who computed what: pclk/bclk inputs to the PHY clock request
+          patch("drivers/gpu/drm/msm/dsi/dsi_host.c",
+                '\tDBG("pclk=%d, bclk=%d", msm_host->pixel_clk_rate,\n'
+                '\t\t\t\tmsm_host->byte_clk_rate);\n',
+                '\tDBG("pclk=%d, bclk=%d", msm_host->pixel_clk_rate,\n'
+                '\t\t\t\tmsm_host->byte_clk_rate);\n'
+                '\tpr_info("dsi_calc: pclk=%u bclk=%u lanes=%u bpp=%u bonded=%d mode_clock=%u\\n",\n'
+                '\t\tmsm_host->pixel_clk_rate, msm_host->byte_clk_rate, lanes, bpp,\n'
+                '\t\t(int)is_bonded_dsi, msm_host->mode ? msm_host->mode->clock : 0);\n')
+
+          # 2) actual rates the clock framework/PHY really programmed
+          patch("drivers/gpu/drm/msm/dsi/dsi_host.c",
+                '\tret = cfg_hnd->ops->link_clk_set_rate(msm_host);\n'
+                '\tif (!ret)\n'
+                '\t\tret = cfg_hnd->ops->link_clk_enable(msm_host);\n',
+                '\tret = cfg_hnd->ops->link_clk_set_rate(msm_host);\n'
+                '\tif (!ret)\n'
+                '\t\tret = cfg_hnd->ops->link_clk_enable(msm_host);\n'
+                '\tif (!ret)\n'
+                '\t\tpr_info("dsi_pwr: pclk=%u bclk=%u byte_clk=%lu pixel_clk=%lu src_clk=%lu\\n",\n'
+                '\t\t\tmsm_host->pixel_clk_rate, msm_host->byte_clk_rate,\n'
+                '\t\t\tclk_get_rate(msm_host->byte_clk),\n'
+                '\t\t\tmsm_host->pixel_clk ? clk_get_rate(msm_host->pixel_clk) : 0UL,\n'
+                '\t\t\tmsm_host->src_clk ? clk_get_rate(msm_host->src_clk) : 0UL);\n')
+
+          # 3) DRM mode vs adjusted mode reaching the DSI bridge
+          patch("drivers/gpu/drm/msm/dsi/dsi_manager.c",
+                '\tDBG("set mode: " DRM_MODE_FMT, DRM_MODE_ARG(mode));\n',
+                '\tDBG("set mode: " DRM_MODE_FMT, DRM_MODE_ARG(mode));\n'
+                '\tpr_info("dsi_mgr_mode_set: clock=%u adjusted=%u htotal=%u vtotal=%u bonded=%d\\n",\n'
+                '\t\tmode->clock, adjusted_mode->clock, adjusted_mode->htotal,\n'
+                '\t\tadjusted_mode->vtotal, (int)is_bonded_dsi);\n')
+
+          # 4) panel: non-burst video mode keeps hsync/vsync in-band, so a
+          #    marginal byte clock no longer decides whether the panel locks
+          patch("drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c",
+                '\tdsi->mode_flags = MIPI_DSI_MODE_VIDEO_BURST |\n'
+                '\t\t\t  MIPI_DSI_CLOCK_NON_CONTINUOUS;\n',
+                '\tdsi->mode_flags = MIPI_DSI_MODE_VIDEO |\n'
+                '\t\t\t  MIPI_DSI_MODE_VIDEO_SYNC_PULSE |\n'
+                '\t\t\t  MIPI_DSI_CLOCK_NON_CONTINUOUS;\n')
+
+          # 5) on() sets LPM and never clears it; off() only clears it there,
+          #    so the video stream stayed in LP mode after panel init
+          patch("drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c",
+                '\tdsi_generic_write_seq(dsi, 0xb0, 0x03);\n'
+                '\n'
+                '\treturn 0;\n'
+                '}\n'
+                '\n'
+                'static int jdi_fhd_r63452_off',
+                '\tdsi_generic_write_seq(dsi, 0xb0, 0x03);\n'
+                '\n'
+                '\tdsi->mode_flags &= ~MIPI_DSI_MODE_LPM;\n'
+                '\n'
+                '\treturn 0;\n'
+                '}\n'
+                '\n'
+                'static int jdi_fhd_r63452_off')
+          PYEOF
+          grep -n 'dsi_calc: pclk' drivers/gpu/drm/msm/dsi/dsi_host.c
+          grep -n 'dsi_pwr: pclk' drivers/gpu/drm/msm/dsi/dsi_host.c
+          grep -n 'dsi_mgr_mode_set' drivers/gpu/drm/msm/dsi/dsi_manager.c
+          grep -n -A4 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
