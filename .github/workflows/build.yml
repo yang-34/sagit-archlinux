@@ -203,22 +203,22 @@ jobs:
                 '\n'
                 '#define S_DIV_ROUND_UP')
 
-          patch("drivers/gpu/drm/msm/dsi/phy/dsi_phy.c",
-                '\ttiming->ta_go = 3;\n'
-                '\ttiming->ta_sure = 0;\n'
-                '\ttiming->ta_get = 4;\n',
-                '\tif (force_vendor_dphy_timing) {\n'
-                '\t\tpr_info("dsi_phy: computed clk_pre=%d clk_post=%d -> vendor 0x28/0x07\\n",\n'
-                '\t\t\ttiming->shared_timings.clk_pre,\n'
-                '\t\t\ttiming->shared_timings.clk_post);\n'
-                '\t\ttiming->shared_timings.clk_pre = 0x28;\n'
-                '\t\ttiming->shared_timings.clk_post = 0x07;\n'
-                '\t\ttiming->shared_timings.clk_pre_inc_by_2 = 0;\n'
-                '\t}\n'
-                '\n'
-                '\ttiming->ta_go = 3;\n'
-                '\ttiming->ta_sure = 0;\n'
-                '\ttiming->ta_get = 4;\n')
+          pp = "drivers/gpu/drm/msm/dsi/phy/dsi_phy.c"
+          t = open(pp).read()
+          start = t.index("int msm_dsi_dphy_timing_calc_v3")
+          idx = t.index("\ttiming->ta_go = 3;\n", start)
+          override = ('\tif (force_vendor_dphy_timing) {\n'
+                      '\t\tpr_info("dsi_phy: computed clk_pre=%d clk_post=%d -> vendor 0x28/0x07\\n",\n'
+                      '\t\t\ttiming->shared_timings.clk_pre,\n'
+                      '\t\t\ttiming->shared_timings.clk_post);\n'
+                      '\t\ttiming->shared_timings.clk_pre = 0x28;\n'
+                      '\t\ttiming->shared_timings.clk_post = 0x07;\n'
+                      '\t\ttiming->shared_timings.clk_pre_inc_by_2 = 0;\n'
+                      '\t}\n'
+                      '\n')
+          t = t[:idx] + override + t[idx:]
+          open(pp, "w").write(t)
+          print("vendor timing override inserted in v3")
 
           # 2) TE gpio irq counter so /proc/interrupts shows panel scanning
           patch("drivers/gpu/drm/msm/dsi/dsi_host.c",
