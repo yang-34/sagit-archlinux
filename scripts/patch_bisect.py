@@ -128,6 +128,20 @@ def main():
             print("OK      BISECT: bit10")
         else:
             print("MISS    BISECT: bit10")
+    if "BISECT: bit11" not in a5:
+        m = re.search(r"static struct msm_gem_address_space \*\n"
+                      r"(a5xx_create_private_address_space\(struct msm_gpu \*gpu\))\n\{\n",
+                      a5)
+        if m:
+            a5 = (a5[:m.end()]
+                  + '\tif (adreno_debug_stage & (1 << 11)) {\n'
+                    '\t\tpr_err("BISECT: bit11 disable per-process aspace\\n");\n'
+                    '\t\treturn ERR_PTR(-ENODEV);\n'
+                    '\t}\n\n'
+                  + a5[m.end():])
+            print("OK      BISECT: bit11")
+        else:
+            print("MISS    BISECT: bit11")
     write(A5, a5)
 
     checks = {
@@ -135,6 +149,7 @@ def main():
         "bits0-4": all(("BISECT: bit%d" % i) in read(DEV) for i in range(5)),
         "bits5-9": all(("BISECT: bit%d" % i) in read(A5) for i in range(5, 10)),
         "bit10": "BISECT: bit10" in read(A5),
+        "bit11": "BISECT: bit11" in read(A5),
         "extern": "extern int adreno_debug_stage;" in read(HDR),
     }
     for name, ok in checks.items():
