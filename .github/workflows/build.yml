@@ -173,73 +173,114 @@ jobs:
           grep -n 'dsi_mgr_mode_set' drivers/gpu/drm/msm/dsi/dsi_manager.c
           grep -n -A4 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
-      - name: Reorder panel power-on (sleep out then display on, build-71)
+      - name: Vendor DPHY timing override + TE irq counter (build-73)
         run: |
           cd kernel
           python3 - <<'PYEOF'
-          p = "drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c"
-          s = open(p).read()
-          order_old = ('\tret = mipi_dsi_dcs_set_display_on(dsi);\n'
-                       '\tif (ret < 0) {\n'
-                       '\t\tdev_err(dev, "Failed to set display on: %d\\n", ret);\n'
-                       '\t\treturn ret;\n'
-                       '\t}\n'
-                       '\tmsleep(20);\n'
-                       '\n'
-                       '\tret = mipi_dsi_dcs_exit_sleep_mode(dsi);\n'
-                       '\tif (ret < 0) {\n'
-                       '\t\tdev_err(dev, "Failed to exit sleep mode: %d\\n", ret);\n'
-                       '\t\treturn ret;\n'
-                       '\t}\n'
-                       '\tmsleep(80);\n')
-          assert s.count(order_old) == 1, s.count(order_old)
-          order_new = ('\tpr_info("panel: exit_sleep t=%llu\\n", ktime_get_ns());\n'
-                       '\tret = mipi_dsi_dcs_exit_sleep_mode(dsi);\n'
-                       '\tif (ret < 0) {\n'
-                       '\t\tdev_err(dev, "Failed to exit sleep mode: %d\\n", ret);\n'
-                       '\t\treturn ret;\n'
-                       '\t}\n'
-                       '\tmsleep(120);\n'
-                       '\n'
-                       '\tpr_info("panel: display_on t=%llu\\n", ktime_get_ns());\n'
-                       '\tret = mipi_dsi_dcs_set_display_on(dsi);\n'
-                       '\tif (ret < 0) {\n'
-                       '\t\tdev_err(dev, "Failed to set display on: %d\\n", ret);\n'
-                       '\t\treturn ret;\n'
-                       '\t}\n'
-                       '\tmsleep(20);\n')
-          s = s.replace(order_old, order_new, 1)
-          open(p, "w").write(s)
-          print("panel power-on order: exit sleep -> display on")
-          PYEOF
-          grep -n -A14 'panel: exit_sleep' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:60])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
 
-      - name: Re-issue display on after vendor page writes (build-72)
-        run: |
-          cd kernel
-          python3 - <<'PYEOF'
-          p = "drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c"
-          s = open(p).read()
-          old = ('\tdsi_generic_write_seq(dsi, 0xb0, 0x03);\n'
-                 '\n'
-                 '\t{\n')
-          assert s.count(old) == 1, s.count(old)
-          new = ('\tdsi_generic_write_seq(dsi, 0xb0, 0x03);\n'
-                 '\n'
-                 '\tpr_info("panel: display_on_late t=%llu\\n", ktime_get_ns());\n'
-                 '\tret = mipi_dsi_dcs_set_display_on(dsi);\n'
-                 '\tif (ret < 0) {\n'
-                 '\t\tdev_err(dev, "Failed to set display on (late): %d\\n", ret);\n'
-                 '\t\treturn ret;\n'
-                 '\t}\n'
-                 '\tmsleep(20);\n'
-                 '\n'
-                 '\t{\n')
-          s = s.replace(old, new, 1)
-          open(p, "w").write(s)
-          print("late display_on added")
+          # 1) module switch + vendor t-clk-pre/post override
+          patch("drivers/gpu/drm/msm/dsi/phy/dsi_phy.c",
+                '#include "dsi_phy.h"\n\n#define S_DIV_ROUND_UP',
+                '#include "dsi_phy.h"\n'
+                '\n'
+                '#include <linux/module.h>\n'
+                '\n'
+                '/*\n'
+                ' * BISECT-73: vendor panel DTSI hardcodes t-clk-pre = 0x28 and\n'
+                ' * t-clk-post = 0x07.  Force those two PHY timing fields instead of\n'
+                ' * the values computed from the bit rate; set\n'
+                ' * force_vendor_dphy_timing=0 to compare with the computed ones.\n'
+                ' */\n'
+                'static bool force_vendor_dphy_timing = true;\n'
+                'module_param(force_vendor_dphy_timing, bool, 0644);\n'
+                'MODULE_PARM_DESC(force_vendor_dphy_timing,\n'
+                '\t\t "use vendor t-clk-pre/t-clk-post instead of computed values");\n'
+                '\n'
+                '#define S_DIV_ROUND_UP')
+
+          patch("drivers/gpu/drm/msm/dsi/phy/dsi_phy.c",
+                '\ttiming->ta_go = 3;\n'
+                '\ttiming->ta_sure = 0;\n'
+                '\ttiming->ta_get = 4;\n',
+                '\tif (force_vendor_dphy_timing) {\n'
+                '\t\tpr_info("dsi_phy: computed clk_pre=%d clk_post=%d -> vendor 0x28/0x07\\n",\n'
+                '\t\t\ttiming->shared_timings.clk_pre,\n'
+                '\t\t\ttiming->shared_timings.clk_post);\n'
+                '\t\ttiming->shared_timings.clk_pre = 0x28;\n'
+                '\t\ttiming->shared_timings.clk_post = 0x07;\n'
+                '\t\ttiming->shared_timings.clk_pre_inc_by_2 = 0;\n'
+                '\t}\n'
+                '\n'
+                '\ttiming->ta_go = 3;\n'
+                '\ttiming->ta_sure = 0;\n'
+                '\ttiming->ta_get = 4;\n')
+
+          # 2) TE gpio irq counter so /proc/interrupts shows panel scanning
+          patch("drivers/gpu/drm/msm/dsi/dsi_host.c",
+                '\tstruct gpio_desc *disp_en_gpio;\n'
+                '\tstruct gpio_desc *te_gpio;\n',
+                '\tstruct gpio_desc *disp_en_gpio;\n'
+                '\tstruct gpio_desc *te_gpio;\n'
+                '\tint te_irq;\n'
+                '\tatomic_t te_count;\n')
+
+          patch("drivers/gpu/drm/msm/dsi/dsi_host.c",
+                'static int dsi_host_init_panel_gpios(struct msm_dsi_host *msm_host,\n'
+                '\t\t\tstruct device *panel_device)\n'
+                '{\n',
+                'static irqreturn_t dsi_te_irq_handler(int irq, void *data)\n'
+                '{\n'
+                '\tstruct msm_dsi_host *msm_host = data;\n'
+                '\n'
+                '\tatomic_inc(&msm_host->te_count);\n'
+                '\treturn IRQ_HANDLED;\n'
+                '}\n'
+                '\n'
+                'static int dsi_host_init_panel_gpios(struct msm_dsi_host *msm_host,\n'
+                '\t\t\tstruct device *panel_device)\n'
+                '{\n')
+
+          patch("drivers/gpu/drm/msm/dsi/dsi_host.c",
+                '\tif (IS_ERR(msm_host->te_gpio)) {\n'
+                '\t\tDBG("cannot get disp-te-gpios %ld", PTR_ERR(msm_host->te_gpio));\n'
+                '\t\treturn PTR_ERR(msm_host->te_gpio);\n'
+                '\t}\n'
+                '\n'
+                '\treturn 0;\n'
+                '}\n',
+                '\tif (IS_ERR(msm_host->te_gpio)) {\n'
+                '\t\tDBG("cannot get disp-te-gpios %ld", PTR_ERR(msm_host->te_gpio));\n'
+                '\t\treturn PTR_ERR(msm_host->te_gpio);\n'
+                '\t}\n'
+                '\n'
+                '\tif (msm_host->te_gpio) {\n'
+                '\t\tmsm_host->te_irq = gpiod_to_irq(msm_host->te_gpio);\n'
+                '\t\tif (msm_host->te_irq > 0) {\n'
+                '\t\t\tif (devm_request_irq(&msm_host->pdev->dev,\n'
+                '\t\t\t\t\t\t      msm_host->te_irq,\n'
+                '\t\t\t\t\t\t      dsi_te_irq_handler,\n'
+                '\t\t\t\t\t\t      IRQF_TRIGGER_RISING,\n'
+                '\t\t\t\t\t\t      "dsi_te", msm_host))\n'
+                '\t\t\t\tpr_err("dsi_te: cannot request irq %d\\n",\n'
+                '\t\t\t\t       msm_host->te_irq);\n'
+                '\t\t\telse\n'
+                '\t\t\t\tpr_info("dsi_te: irq %d registered\\n",\n'
+                '\t\t\t\t\tmsm_host->te_irq);\n'
+                '\t\t} else {\n'
+                '\t\t\tpr_info("dsi_te: gpio has no irq (%d)\\n", msm_host->te_irq);\n'
+                '\t\t}\n'
+                '\t}\n'
+                '\n'
+                '\treturn 0;\n'
+                '}\n')
           PYEOF
-          grep -n -A6 'display_on_late' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
+          grep -n 'force_vendor_dphy_timing' drivers/gpu/drm/msm/dsi/phy/dsi_phy.c | head -5
+          grep -n 'dsi_te' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
 
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
@@ -330,7 +371,7 @@ jobs:
           make ARCH=$ARCH CROSS_COMPILE=$CROSS sagit_defconfig
           set +e
           scripts/config --file .config \
-            -e DEVTMPFS -e DEVTMPFS_MOUNT \
+            -e DEVTMPFS -e DEVTMPFS_MOUNT -e DEVMEM -d IO_STRICT_DEVMEM \
             -e DRM -m DRM_MSM -e DRM_FBDEV_EMULATION -e DRM_PANEL_JDI_FHD_R63452 \
             -e FB -e FRAMEBUFFER_CONSOLE -e VT -e VT_CONSOLE \
             -e RMI4_CORE -e RMI4_I2C \
@@ -347,7 +388,7 @@ jobs:
           set -e
           make ARCH=$ARCH CROSS_COMPILE=$CROSS olddefconfig
           echo "=== key symbols ==="
-          for s in CONFIG_DRM_MSM CONFIG_DRM_PANEL_JDI_FHD_R63452 CONFIG_DRM_FBDEV_EMULATION \
+          for s in CONFIG_DRM_MSM CONFIG_DEVMEM CONFIG_DRM_PANEL_JDI_FHD_R63452 CONFIG_DRM_FBDEV_EMULATION \
                    CONFIG_BACKLIGHT_QCOM_WLED CONFIG_I2C_QCOM_GENI CONFIG_I2C_QUP CONFIG_INPUT_EVDEV \
                    CONFIG_FRAMEBUFFER_CONSOLE CONFIG_RMI4_CORE CONFIG_RMI4_I2C \
                    CONFIG_RTC_DRV_PM8XXX CONFIG_RTC_HCTOSYS CONFIG_BATTERY_QCOM_FG \
