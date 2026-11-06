@@ -136,19 +136,13 @@ jobs:
           grep -n 'dsi_mgr_mode_set' drivers/gpu/drm/msm/dsi/dsi_manager.c
           grep -n -A4 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
-      - name: Fix DSI byte clock rate on the PHY clock (program PLL out divider, build-57)
+      - name: Fix DSI byte clock rate last in the rate sequence (build-58)
         run: |
           cd kernel
           python3 - <<'PYEOF'
           p = "drivers/gpu/drm/msm/dsi/dsi_host.c"
           s = open(p).read()
-          old = ('\tret = dev_pm_opp_set_rate(&msm_host->pdev->dev,\n'
-                 '\t\t\t\t  msm_host->byte_clk_rate);\n'
-                 '\tif (ret) {\n'
-                 '\t\tpr_err("%s: dev_pm_opp_set_rate failed %d\\n", __func__, ret);\n'
-                 '\t\treturn ret;\n'
-                 '\t}\n')
-          assert s.count(old) == 1, s.count(old)
+
           decl_old = ('int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)\n'
                       '{\n'
                       '\tu32 byte_intf_rate;\n'
@@ -157,35 +151,54 @@ jobs:
           s = s.replace(decl_old, decl_old.replace('\tint ret;\n',
                                                    '\tint ret;\n'
                                                    '\tstruct clk *byte_pll_clk;\n'), 1)
-          new = old + ('\n'
-                       '\t/*\n'
-                       '\t * The msm8998 DSI OPP table only carries CX corner votes, so the\n'
-                       '\t * byte clock never reaches the PHY PLL and it keeps the\n'
-                       '\t * bootloader out-divider (observed out_div=4 = half rate).  The\n'
-                       '\t * mmcc byte RCG does not propagate the request upwards, so ask\n'
-                       '\t * the PHY byte clock (its parent) directly: bit_clk, out_div and\n'
-                       '\t * VCO all implement CLK_SET_RATE_PARENT.\n'
-                       '\t */\n'
-                       '\tbyte_pll_clk = clk_get_parent(msm_host->byte_clk_src);\n'
-                       '\tif (!IS_ERR_OR_NULL(byte_pll_clk)) {\n'
-                       '\t\tpr_info("dsi_clk: req=%u byte=%lu src=%lu pll=%lu\\n",\n'
-                       '\t\t\tmsm_host->byte_clk_rate,\n'
-                       '\t\t\tclk_get_rate(msm_host->byte_clk),\n'
-                       '\t\t\tclk_get_rate(msm_host->byte_clk_src),\n'
-                       '\t\t\tclk_get_rate(byte_pll_clk));\n'
-                       '\t\tret = clk_set_rate(byte_pll_clk, msm_host->byte_clk_rate);\n'
-                       '\t\tif (ret)\n'
-                       '\t\t\tpr_err("%s: Failed to set PHY byte clk, %d\\n",\n'
-                       '\t\t\t       __func__, ret);\n'
-                       '\t\tpr_info("dsi_clk_after: byte=%lu src=%lu pll=%lu\\n",\n'
-                       '\t\t\tclk_get_rate(msm_host->byte_clk),\n'
-                       '\t\t\tclk_get_rate(msm_host->byte_clk_src),\n'
-                       '\t\t\tclk_get_rate(byte_pll_clk));\n'
-                       '\t}\n')
-          open(p, "w").write(s.replace(old, new, 1))
-          print("PHY byte clk rate programming added")
+
+          anchor = ('\t\tret = clk_set_rate(msm_host->byte_intf_clk, byte_intf_rate);\n'
+                    '\t\tif (ret) {\n'
+                    '\t\t\tpr_err("%s: Failed to set rate byte intf clk, %d\\n",\n'
+                    '\t\t\t       __func__, ret);\n'
+                    '\t\t\treturn ret;\n'
+                    '\t\t}\n'
+                    '\t}\n'
+                    '\n'
+                    '\treturn 0;\n'
+                    '}\n')
+          assert s.count(anchor) == 1, s.count(anchor)
+
+          add = ('\t}\n'
+                 '\n'
+                 '\t/*\n'
+                 '\t * The msm8998 DSI OPP table only carries CX corner votes, so the\n'
+                 '\t * byte clock never reaches the PHY PLL: it keeps the bootloader\n'
+                 '\t * out-divider (observed out_div=4, i.e. exactly half the byte\n'
+                 '\t * clock the mode needs).  The mmcc byte RCG does not propagate\n'
+                 '\t * the request upwards, and the byte_intf request above is half\n'
+                 '\t * rate on the same RCG, so program the PHY byte clock directly\n'
+                 '\t * and do it last.  bit_clk, out_div and VCO all implement\n'
+                 '\t * CLK_SET_RATE_PARENT.\n'
+                 '\t */\n'
+                 '\tbyte_pll_clk = clk_get_parent(msm_host->byte_clk_src);\n'
+                 '\tif (!IS_ERR_OR_NULL(byte_pll_clk)) {\n'
+                 '\t\trret = clk_set_rate(byte_pll_clk, msm_host->byte_clk_rate);\n'
+                 '\t\tif (rret)\n'
+                 '\t\t\tpr_err("%s: Failed to set PHY byte clk, %d\\n",\n'
+                 '\t\t\t       __func__, rret);\n'
+                 '\t\tpr_info("dsi_clk: req=%u byte=%lu src=%lu pll=%lu\\n",\n'
+                 '\t\t\tmsm_host->byte_clk_rate,\n'
+                 '\t\t\tclk_get_rate(msm_host->byte_clk),\n'
+                 '\t\t\tclk_get_rate(msm_host->byte_clk_src),\n'
+                 '\t\t\tclk_get_rate(byte_pll_clk));\n'
+                 '\t}\n'
+                 '\n'
+                 '\treturn 0;\n'
+                 '}\n')
+          s = s.replace(anchor, add, 1)
+          s = s.replace('\tstruct clk *byte_pll_clk;\n',
+                      '\tstruct clk *byte_pll_clk;\n'
+                      '\tint rret;\n', 1)
+          open(p, "w").write(s)
+          print("PHY byte clk rate set last")
           PYEOF
-          grep -n -A14 'byte_pll_clk = clk_get_parent' drivers/gpu/drm/msm/dsi/dsi_host.c
+          grep -n -A16 'byte_pll_clk = clk_get_parent' drivers/gpu/drm/msm/dsi/dsi_host.c
 
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
