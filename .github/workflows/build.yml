@@ -214,6 +214,33 @@ jobs:
           PYEOF
           grep -n -A14 'panel: exit_sleep' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
+      - name: Re-issue display on after vendor page writes (build-72)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          p = "drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c"
+          s = open(p).read()
+          old = ('\tdsi_generic_write_seq(dsi, 0xb0, 0x03);\n'
+                 '\n'
+                 '\t{\n')
+          assert s.count(old) == 1, s.count(old)
+          new = ('\tdsi_generic_write_seq(dsi, 0xb0, 0x03);\n'
+                 '\n'
+                 '\tpr_info("panel: display_on_late t=%llu\\n", ktime_get_ns());\n'
+                 '\tret = mipi_dsi_dcs_set_display_on(dsi);\n'
+                 '\tif (ret < 0) {\n'
+                 '\t\tdev_err(dev, "Failed to set display on (late): %d\\n", ret);\n'
+                 '\t\treturn ret;\n'
+                 '\t}\n'
+                 '\tmsleep(20);\n'
+                 '\n'
+                 '\t{\n')
+          s = s.replace(old, new, 1)
+          open(p, "w").write(s)
+          print("late display_on added")
+          PYEOF
+          grep -n -A6 'display_on_late' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
