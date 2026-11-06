@@ -229,6 +229,8 @@ jobs:
           # 5) DCS readback + mode_flags at the end of on()
           anchor = ('\tdsi_generic_write_seq(dsi, 0xb0, 0x03);\n'
                     '\n'
+                    '\tdsi->mode_flags &= ~MIPI_DSI_MODE_LPM;\n'
+                    '\n'
                     '\treturn 0;\n'
                     '}\n'
                     '\n'
