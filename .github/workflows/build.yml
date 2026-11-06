@@ -170,7 +170,7 @@ jobs:
           grep -n 'dsi_mgr_mode_set' drivers/gpu/drm/msm/dsi/dsi_manager.c
           grep -n -A4 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
-      - name: Enable DSI video mode at the bootloader /4 PLL rate (build-67)
+      - name: Enable DSI video mode with continuous HS clock (build-70)
         run: |
           cd kernel
           python3 - <<'PYEOF'
@@ -180,11 +180,10 @@ jobs:
                  '\t\t\t  MIPI_DSI_CLOCK_NON_CONTINUOUS;\n')
           assert s.count(old) == 1, s.count(old)
           new = ('\tdsi->mode_flags = MIPI_DSI_MODE_VIDEO |\n'
-                 '\t\t\t  MIPI_DSI_MODE_VIDEO_BURST |\n'
-                 '\t\t\t  MIPI_DSI_CLOCK_NON_CONTINUOUS;\n')
+                 '\t\t\t  MIPI_DSI_MODE_VIDEO_BURST;\n')
           s = s.replace(old, new, 1)
           open(p, "w").write(s)
-          print("video mode kept at the bootloader PLL outdiv (/4)")
+          print("video mode with continuous HS clock (CLOCK_NON_CONTINUOUS dropped)")
           PYEOF
           grep -n -A3 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
