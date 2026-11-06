@@ -136,6 +136,38 @@ jobs:
           grep -n 'dsi_mgr_mode_set' drivers/gpu/drm/msm/dsi/dsi_manager.c
           grep -n -A4 'dsi->mode_flags = MIPI_DSI_MODE_VIDEO' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c
 
+      - name: Fix DSI byte clock rate (program PHY PLL out divider, build-56)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          p = "drivers/gpu/drm/msm/dsi/dsi_host.c"
+          s = open(p).read()
+          old = ('\tret = dev_pm_opp_set_rate(&msm_host->pdev->dev,\n'
+                 '\t\t\t\t  msm_host->byte_clk_rate);\n'
+                 '\tif (ret) {\n'
+                 '\t\tpr_err("%s: dev_pm_opp_set_rate failed %d\\n", __func__, ret);\n'
+                 '\t\treturn ret;\n'
+                 '\t}\n')
+          assert s.count(old) == 1, s.count(old)
+          new = old + ('\n'
+                       '\t/*\n'
+                       '\t * Only the byte clock chain (mdss_byte0_clk ->\n'
+                       '\t * phy_pll_out_byteclk -> pll_bit_clk -> pll_out_div_clk ->\n'
+                       '\t * VCO) propagates all the way to the DSI PLL; the pixel chain\n'
+                       '\t * stops at the PHY pixel divider.  Without this rate request the\n'
+                       '\t * PLL keeps the bootloader divider state (observed out_div=4,\n'
+                       '\t * i.e. exactly half the byte clock the mode requires).\n'
+                       '\t */\n'
+                       '\tret = clk_set_rate(msm_host->byte_clk, msm_host->byte_clk_rate);\n'
+                       '\tif (ret) {\n'
+                       '\t\tpr_err("%s: Failed to set byte clk, %d\\n", __func__, ret);\n'
+                       '\t\treturn ret;\n'
+                       '\t}\n')
+          open(p, "w").write(s.replace(old, new, 1))
+          print("byte clk rate programming added")
+          PYEOF
+          grep -n -A8 'Failed to set byte clk' drivers/gpu/drm/msm/dsi/dsi_host.c
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
