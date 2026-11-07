@@ -292,7 +292,7 @@ jobs:
           grep -n 'force_vendor_dphy_timing' drivers/gpu/drm/msm/dsi/phy/dsi_phy.c | head -5
           grep -n 'dsi_te' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
 
-      - name: DCS probe fill v7 64x4 + fullscreen red + frame counter (build-80)
+      - name: DCS fill v8 + PLL outdiv fix + cmd-mode probes (build-81)
         run: |
           cd kernel
           python3 - <<'PYEOF'
@@ -373,7 +373,7 @@ jobs:
               u8 col[4] = { 0x00, 0x00, 0x04, 0x37 };
               u8 page[4] = { 0x00, 0x00, 0x07, 0x7f };
               u8 zero = 0x00;
-              int px_per = 360, per_row = 3, rows = 1920;
+              int px_per = 24, per_row = 45, rows = 1920;
               int chunk, row, i, ret, done = 0;
               u8 *buf;
 
@@ -551,11 +551,49 @@ jobs:
                    '\t\t\tatomic_read(&msm_host->te_count), ktime_get_ns());\n')
           assert h.count(oldtx) == 1, h.count(oldtx)
           h = h.replace(oldtx, newtx, 1)
+
+          oldwc = ('\t\t/* image data and 1 byte write_memory_start cmd */\n'
+                   '\t\twc = hdisplay * dsi_get_bpp(msm_host->format) / 8 + 1;\n')
+          newwc = (oldwc +
+                   '\t\tpr_info("dsi_timing: cmd wc=%u hdisplay=%u vdisplay=%u\\n",\n'
+                   '\t\t\twc, hdisplay, mode->vdisplay);\n')
+          assert h.count(oldwc) == 1, h.count(oldwc)
+          h = h.replace(oldwc, newwc, 1)
+
+          oldop = ('\tu32 dsi_ctrl;\n'
+                   '\n'
+                   '\tdsi_ctrl = dsi_read(msm_host, REG_DSI_CTRL);\n')
+          newop = ('\tu32 dsi_ctrl;\n'
+                   '\n'
+                   '\tpr_info("dsi_op_mode: video=%d enable=%d\\n",\n'
+                   '\t\tvideo_mode, enable);\n'
+                   '\tdsi_ctrl = dsi_read(msm_host, REG_DSI_CTRL);\n')
+          assert h.count(oldop) == 1, h.count(oldop)
+          h = h.replace(oldop, newop, 1)
           open(hp, "w").write(h)
+
+          pp = "drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c"
+          ph = open(pp).read()
+          anc = '\tdsi_pll_commit(pll_10nm, &config);\n'
+          ins = ('\t{\n'
+                 '\t\tu32 od = dsi_phy_read(pll_10nm->phy->pll_base +\n'
+                 '\t\t\tREG_DSI_10nm_PHY_PLL_PLL_OUTDIV_RATE);\n'
+                 '\n'
+                 '\t\tpr_info("dsi_pll: outdiv 0x%x -> 0x1 (vco=%lu)\\n",\n'
+                 '\t\t\tod, pll_10nm->vco_current_rate);\n'
+                 '\t\tdsi_phy_write(pll_10nm->phy->pll_base +\n'
+                 '\t\t\tREG_DSI_10nm_PHY_PLL_PLL_OUTDIV_RATE,\n'
+                 '\t\t\t(od & ~0x3) | 0x1);\n'
+                 '\t}\n')
+          assert ph.count(anc) == 1, ph.count(anc)
+          ph = ph.replace(anc, anc + ins, 1)
+          open(pp, "w").write(ph)
+          print("dsi_phy_10nm outdiv /2 forced")
           print("dsi_host seq log + TE gate + frame counter patched")
           PYEOF
           grep -n 'jdi_fill_full\|jdi_fill64x4\|late start' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -8
-          grep -n 'dsi_frm %d\|te_gate_wr_mem' drivers/gpu/drm/msm/dsi/dsi_host.c | head -6
+          grep -n 'dsi_frm %d\|te_gate_wr_mem\|dsi_timing: cmd' drivers/gpu/drm/msm/dsi/dsi_host.c | head -6
+          grep -n 'outdiv 0x%x' drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c | head -3
 
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
