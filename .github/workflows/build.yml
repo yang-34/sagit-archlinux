@@ -292,7 +292,7 @@ jobs:
           grep -n 'force_vendor_dphy_timing' drivers/gpu/drm/msm/dsi/phy/dsi_phy.c | head -5
           grep -n 'dsi_te' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
 
-      - name: DCS probe fill v4 fix API + packet dump + TE gate (build-78)
+      - name: DCS probe fill v5 awake + GRAM readback (build-79)
         run: |
           cd kernel
           python3 - <<'PYEOF'
@@ -324,6 +324,18 @@ jobs:
               return mipi_dsi_dcs_write_buffer(dsi, buf, len);
           }
 
+          static void jdi_read_mem(struct mipi_dsi_device *dsi, const char *tag)
+          {
+              u8 b[8];
+              int rc, i;
+
+              for (i = 0; i < 8; i++)
+                  b[i] = 0xee;
+              rc = mipi_dsi_dcs_read(dsi, MIPI_DCS_READ_MEMORY_START, b, 8);
+              pr_info("panel: %s 2e rc=%d %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                      tag, rc, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+          }
+
           static void jdi_probe_fill(struct mipi_dsi_device *dsi)
           {
               u8 col16[4] = { 0x00, 0x00, 0x00, 0x0f };
@@ -338,23 +350,15 @@ jobs:
               ret = mipi_dsi_dcs_write(dsi, 0xb0, &page0, 1);
               pr_info("panel: B0=00 ret=%d\n", ret);
               jdi_read2(dsi, "pre29");
-              ret = mipi_dsi_dcs_set_display_on(dsi);
-              pr_info("panel: 29 ret=%d\n", ret);
-              msleep(20);
-              jdi_read2(dsi, "post29");
-              ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_ENTER_NORMAL_MODE, NULL, 0);
-              pr_info("panel: 13 normal ret=%d\n", ret);
-              jdi_read2(dsi, "post13");
-              ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_ENTER_SLEEP_MODE, NULL, 0);
-              pr_info("panel: 10 sleep ret=%d\n", ret);
-              msleep(20);
-              jdi_read2(dsi, "postsleep");
               ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_EXIT_SLEEP_MODE, NULL, 0);
               pr_info("panel: 11 wake ret=%d\n", ret);
               msleep(120);
               jdi_read2(dsi, "postwake");
+              ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_ENTER_NORMAL_MODE, NULL, 0);
+              pr_info("panel: 13 normal ret=%d\n", ret);
+              jdi_read2(dsi, "post13");
               ret = mipi_dsi_dcs_set_display_on(dsi);
-              pr_info("panel: 29 again ret=%d\n", ret);
+              pr_info("panel: 29 ret=%d\n", ret);
               msleep(20);
               jdi_read2(dsi, "post29b");
 
@@ -389,6 +393,9 @@ jobs:
               pr_info("panel: block16 rows=%d ret=%d\n", r, ret);
               kfree(buf);
               jdi_read2(dsi, "postfill");
+              jdi_read_mem(dsi, "gram-now");
+              msleep(200);
+              jdi_read_mem(dsi, "gram-200ms");
           }
           """
 
@@ -436,7 +443,7 @@ jobs:
                      '\t\treturn;\n'
                      '\tc = p[0];\n'
                      '\tif (c != 0x2a && c != 0x2b && c != 0x2c &&\n'
-                     '\t    c != 0x29 && c != 0xb0)\n'
+                     '\t    c != 0x3c && c != 0x2e && c != 0x29 && c != 0xb0)\n'
                      '\t\treturn;\n'
                      '\n'
                      '\tpr_info("dsi_xfer: cmd=%02x type=%02x vc=%02x len=%d te=%d data=%02x %02x %02x %02x %02x\\n",\n'
