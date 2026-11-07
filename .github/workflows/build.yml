@@ -292,6 +292,80 @@ jobs:
           grep -n 'force_vendor_dphy_timing' drivers/gpu/drm/msm/dsi/phy/dsi_phy.c | head -5
           grep -n 'dsi_te' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
 
+      - name: DCS test fill into panel GRAM (build-75, bypasses DPU)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          p = "drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c"
+          s = open(p).read()
+
+          i = s.index("#include")
+          s = (s[:i] + "#include <linux/module.h>\n#include <linux/slab.h>\n" + s[i:])
+
+          helper = (
+              "static bool test_fill = true;\n"
+              "module_param(test_fill, bool, 0644);\n"
+              "MODULE_PARM_DESC(test_fill,\n"
+              "\t\t \"DCS-fill a red band into panel GRAM (bypasses DPU)\");\n"
+              "\n"
+              "static void jdi_fhd_r63452_test_fill(struct mipi_dsi_device *dsi)\n"
+              "{\n"
+              "\tu8 col[] = { 0x00, 0x00, 0x04, 0x37 };\n"
+              "\tu8 page[] = { 0x00, 0x00, 0x00, 0xff };\n"
+              "\tu8 *buf;\n"
+              "\tint i, rows, ret;\n"
+              "\n"
+              "\tbuf = kzalloc(1080 * 3, GFP_KERNEL);\n"
+              "\tif (!buf)\n"
+              "\t\treturn;\n"
+              "\tfor (i = 0; i < 1080 * 3; i += 3) {\n"
+              "\t\tbuf[i] = 0xff;\n"
+              "\t\tbuf[i + 1] = 0x00;\n"
+              "\t\tbuf[i + 2] = 0x00;\n"
+              "\t}\n"
+              "\n"
+              "\tret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_COLUMN_ADDRESS,\n"
+              "\t\t\t\t col, sizeof(col));\n"
+              "\tif (ret < 0) {\n"
+              "\t\tpr_err(\"panel: test_fill column ret=%d\\n\", ret);\n"
+              "\t\tgoto out;\n"
+              "\t}\n"
+              "\tret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_PAGE_ADDRESS,\n"
+              "\t\t\t\t page, sizeof(page));\n"
+              "\tif (ret < 0) {\n"
+              "\t\tpr_err(\"panel: test_fill page ret=%d\\n\", ret);\n"
+              "\t\tgoto out;\n"
+              "\t}\n"
+              "\n"
+              "\tfor (rows = 0; rows < 256; rows++) {\n"
+              "\t\tret = mipi_dsi_dcs_write(dsi,\n"
+              "\t\t\t\trows ? MIPI_DCS_WRITE_MEMORY_CONTINUE :\n"
+              "\t\t\t\t       MIPI_DCS_WRITE_MEMORY_START,\n"
+              "\t\t\t\tbuf, 1080 * 3);\n"
+              "\t\tif (ret < 0) {\n"
+              "\t\t\tpr_err(\"panel: test_fill row %d ret=%d\\n\", rows, ret);\n"
+              "\t\t\tbreak;\n"
+              "\t\t}\n"
+              "\t}\n"
+              "\tpr_info(\"panel: test_fill done rows=%d ret=%d\\n\", rows, ret);\n"
+              "out:\n"
+              "\tkfree(buf);\n"
+              "}\n"
+              "\n")
+
+          anchor = "static int jdi_fhd_r63452_on(struct mipi_dsi_device *dsi)\n"
+          assert s.count(anchor) == 1, s.count(anchor)
+          s = s.replace(anchor, helper + anchor, 1)
+
+          old = ("\tdsi->mode_flags &= ~MIPI_DSI_MODE_LPM;\n"
+                 "\tpr_info(\"panel: flags_out=0x%lx\\n\", dsi->mode_flags);\n")
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, old + "\tif (test_fill)\n\t\tjdi_fhd_r63452_test_fill(dsi);\n", 1)
+          open(p, "w").write(s)
+          print("test_fill patched")
+          PYEOF
+          grep -n 'test_fill' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -8
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
