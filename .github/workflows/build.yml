@@ -292,184 +292,36 @@ jobs:
           grep -n 'force_vendor_dphy_timing' drivers/gpu/drm/msm/dsi/phy/dsi_phy.c | head -5
           grep -n 'dsi_te' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
 
-      - name: DCS fill v8 + PLL outdiv fix + cmd-mode probes (build-81)
+      - name: Clean display bringup page0 fix quiet logs (build-82)
         run: |
           cd kernel
           python3 - <<'PYEOF'
           p = "drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c"
           s = open(p).read()
 
-          i = s.index("#include")
-          s = s[:i] + "#include <linux/module.h>\n#include <linux/slab.h>\n#include <linux/workqueue.h>\n#include <linux/ktime.h>\n" + s[i:]
-
           helper = r"""
-          static bool test_fill = true;
+          static bool page0_fix = true;
 
-          static void jdi_read2(struct mipi_dsi_device *dsi, const char *tag)
-          {
-              u8 v;
-              int rc;
-
-              v = 0;
-              rc = mipi_dsi_dcs_read(dsi, MIPI_DCS_GET_POWER_MODE, &v, 1);
-              pr_info("panel: %s pm rc=%d 0x%02x\n", tag, rc, v);
-              v = 0;
-              rc = mipi_dsi_dcs_read(dsi, MIPI_DCS_GET_DISPLAY_STATUS, &v, 1);
-              pr_info("panel: %s ds rc=%d 0x%02x\n", tag, rc, v);
-          }
-
-          static int jdi_px(struct mipi_dsi_device *dsi, u8 cmd, u8 *buf, int len)
-          {
-              buf[0] = cmd;
-              return mipi_dsi_dcs_write_buffer(dsi, buf, len);
-          }
-
-          static void jdi_read_mem(struct mipi_dsi_device *dsi, const char *tag)
-          {
-              u8 b[8];
-              int rc, i;
-
-              for (i = 0; i < 8; i++)
-                  b[i] = 0xee;
-              rc = mipi_dsi_dcs_read(dsi, MIPI_DCS_READ_MEMORY_START, b, 8);
-              pr_info("panel: %s 2e rc=%d %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                      tag, rc, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
-          }
-
-          static void jdi_fill64x4(struct mipi_dsi_device *dsi)
-          {
-              u8 col[4] = { 0x00, 0x00, 0x00, 0x3f };
-              u8 page[4] = { 0x00, 0x00, 0x00, 0x03 };
-              u8 *buf;
-              int i, r, ret;
-
-              buf = kzalloc(1 + 16 * 3, GFP_KERNEL);
-              if (!buf)
-                  return;
-              for (i = 1; i <= 16 * 3; i += 3) {
-                  buf[i] = 0xff;
-                  buf[i + 1] = 0x00;
-                  buf[i + 2] = 0x00;
-              }
-              ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_COLUMN_ADDRESS, col, 4);
-              if (ret >= 0)
-                  ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_PAGE_ADDRESS, page, 4);
-              pr_info("panel: fill64 win ret=%d\n", ret);
-              for (r = 0; r < 16; r++) {
-                  ret = jdi_px(dsi, r ? MIPI_DCS_WRITE_MEMORY_CONTINUE :
-                                      MIPI_DCS_WRITE_MEMORY_START,
-                              buf, 1 + 16 * 3);
-                  if (ret < 0) {
-                      pr_err("panel: fill64 row %d ret=%d\n", r, ret);
-                      break;
-                  }
-              }
-              pr_info("panel: fill64 done rows=%d ret=%d\n", r, ret);
-              kfree(buf);
-          }
-
-          static void jdi_fill_full(struct mipi_dsi_device *dsi)
-          {
-              u8 col[4] = { 0x00, 0x00, 0x04, 0x37 };
-              u8 page[4] = { 0x00, 0x00, 0x07, 0x7f };
-              u8 zero = 0x00;
-              int px_per = 24, per_row = 45, rows = 1920;
-              int chunk, row, i, ret, done = 0;
-              u8 *buf;
-
-              ret = mipi_dsi_dcs_write(dsi, 0xb0, &zero, 1);
-              pr_info("panel: fillfull B0 ret=%d\n", ret);
-              ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_COLUMN_ADDRESS, col, 4);
-              if (ret >= 0)
-                  ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_PAGE_ADDRESS, page, 4);
-              pr_info("panel: fillfull win ret=%d\n", ret);
-
-              chunk = px_per * 3;
-              buf = kzalloc(1 + chunk, GFP_KERNEL);
-              if (!buf)
-                  return;
-              for (i = 1; i <= chunk; i += 3) {
-                  buf[i] = 0xff;
-                  buf[i + 1] = 0x00;
-                  buf[i + 2] = 0x00;
-              }
-
-              for (row = 0; row < rows; row++) {
-                  for (i = 0; i < per_row; i++) {
-                      ret = jdi_px(dsi, (row == 0 && i == 0) ?
-                                          MIPI_DCS_WRITE_MEMORY_START :
-                                          MIPI_DCS_WRITE_MEMORY_CONTINUE,
-                                  buf, 1 + chunk);
-                      if (ret < 0)
-                          goto out;
-                      done++;
-                  }
-                  if ((row % 192) == 0)
-                      pr_info("panel: fillfull row=%d t=%llu\n",
-                              row, ktime_get_ns());
-              }
-          out:
-              pr_info("panel: fillfull done rows=%d pkts=%d ret=%d\n",
-                      row, done, ret);
-              kfree(buf);
-          }
-
-          static struct delayed_work jdi_late_work;
-          static struct mipi_dsi_device *jdi_late_dsi;
-          static bool jdi_late_ready;
-
-          static void jdi_late_fn(struct work_struct *w)
-          {
-              struct mipi_dsi_device *dsi = jdi_late_dsi;
-
-              pr_info("panel: late start t=%llu\n", ktime_get_ns());
-              jdi_read2(dsi, "late-pre");
-              jdi_read_mem(dsi, "late-pre");
-              jdi_fill_full(dsi);
-              jdi_read2(dsi, "late-post");
-              jdi_read_mem(dsi, "late-post");
-              pr_info("panel: late end t=%llu\n", ktime_get_ns());
-          }
-
-          static void jdi_probe_fill(struct mipi_dsi_device *dsi)
+          static int jdi_page0(struct mipi_dsi_device *dsi)
           {
               u8 zero = 0x00;
               int ret;
 
-              pr_info("panel: fill flags=0x%lx ch=%d lanes=%d fmt=%d\n",
-                      dsi->mode_flags, dsi->channel, dsi->lanes, dsi->format);
               ret = mipi_dsi_dcs_write(dsi, 0xb0, &zero, 1);
-              pr_info("panel: B0=00 ret=%d\n", ret);
-              jdi_read2(dsi, "pre29");
-              ret = mipi_dsi_dcs_set_display_on(dsi);
-              pr_info("panel: 29 ret=%d\n", ret);
-              msleep(20);
-              jdi_read2(dsi, "post29");
-              jdi_fill64x4(dsi);
-              jdi_read2(dsi, "postfill");
-              jdi_read_mem(dsi, "gram-now");
-              msleep(200);
-              jdi_read_mem(dsi, "gram-200ms");
-
-              jdi_late_dsi = dsi;
-              if (!jdi_late_ready) {
-                  INIT_DELAYED_WORK(&jdi_late_work, jdi_late_fn);
-                  jdi_late_ready = true;
-              }
-              mod_delayed_work(system_wq, &jdi_late_work,
-                               msecs_to_jiffies(5000));
+              pr_info("panel: page0 ret=%d\n", ret);
+              return ret;
           }
+
           """
 
           anchor = "static int jdi_fhd_r63452_on(struct jdi_fhd_r63452 *ctx)\n"
           assert s.count(anchor) == 1, s.count(anchor)
           s = s.replace(anchor, helper + anchor, 1)
 
-          i = s.index('pr_info("panel: flags_out=')
-          j = s.index("\n", i) + 1
-          s = s[:j] + "\tif (test_fill)\n\t\tjdi_probe_fill(dsi);\n" + s[j:]
+          i = s.index("\tdsi->mode_flags &= ~MIPI_DSI_MODE_LPM;\n")
+          s = s[:i] + "\tif (page0_fix)\n\t\tjdi_page0(dsi);\n" + s[i:]
           open(p, "w").write(s)
-          print("probe fill v7 patched")
+          print("page0 fix inserted before LPM clear")
 
           hp = "drivers/gpu/drm/msm/dsi/dsi_host.c"
           h = open(hp).read()
@@ -504,7 +356,7 @@ jobs:
                      '\tif (n <= 0 || !p)\n'
                      '\t\treturn;\n'
                      '\tseq++;\n'
-                     '\tif (n > 80)\n'
+                     '\tif (seq > 60)\n'
                      '\t\treturn;\n'
                      '\tpr_info("dsi_seq %03d: cmd=%02x type=%02x vc=%02x len=%d rx=%d lpm=%d te=%d data=%02x %02x %02x %02x %02x\\n",\n'
                      '\t\tseq, p[0], msg->type, msg->channel, n, (int)msg->rx_len,\n'
@@ -569,26 +421,6 @@ jobs:
           assert h.count(old2) == 1, h.count(old2)
           h = h.replace(old2, new2, 1)
 
-          oldtx = ('static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len)\n'
-                   '{\n')
-          newtx = (oldtx +
-                   '\tstatic int frm_cnt;\n'
-                   '\n'
-                   '\tfrm_cnt++;\n'
-                   '\tif (frm_cnt <= 8 || (frm_cnt % 100) == 0 || len > 100000)\n'
-                   '\t\tpr_info("dsi_frm %d: len=%d te=%d t=%llu\\n", frm_cnt, len,\n'
-                   '\t\t\tatomic_read(&msm_host->te_count), ktime_get_ns());\n')
-          assert h.count(oldtx) == 1, h.count(oldtx)
-          h = h.replace(oldtx, newtx, 1)
-
-          oldwc = ('\t\t/* image data and 1 byte write_memory_start cmd */\n'
-                   '\t\twc = hdisplay * dsi_get_bpp(msm_host->format) / 8 + 1;\n')
-          newwc = (oldwc +
-                   '\t\tpr_info("dsi_timing: cmd wc=%u hdisplay=%u vdisplay=%u\\n",\n'
-                   '\t\t\twc, hdisplay, mode->vdisplay);\n')
-          assert h.count(oldwc) == 1, h.count(oldwc)
-          h = h.replace(oldwc, newwc, 1)
-
           oldop = ('\tu32 dsi_ctrl;\n'
                    '\n'
                    '\tdsi_ctrl = dsi_read(msm_host, REG_DSI_CTRL);\n')
@@ -600,34 +432,23 @@ jobs:
           assert h.count(oldop) == 1, h.count(oldop)
           h = h.replace(oldop, newop, 1)
 
+          oldwc = ('\t\t/* image data and 1 byte write_memory_start cmd */\n'
+                   '\t\twc = hdisplay * dsi_get_bpp(msm_host->format) / 8 + 1;\n')
+          assert h.count(oldwc) == 1, h.count(oldwc)
+          h = h.replace(oldwc, oldwc +
+                        '\t\tpr_info("dsi_timing: cmd wc=%u hdisplay=%u vdisplay=%u\\n",\n'
+                        '\t\t\twc, hdisplay, mode->vdisplay);\n', 1)
+
           oldpw = '\tdsi_ctrl_config(msm_host, true, phy_shared_timings, phy);\n'
           newpw = oldpw + '\tdsi_dump_state(msm_host, "power_on");\n'
           assert h.count(oldpw) == 1, h.count(oldpw)
           h = h.replace(oldpw, newpw, 1)
           open(hp, "w").write(h)
-
-          pp = "drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c"
-          ph = open(pp).read()
-          anc = '\tdsi_pll_commit(pll_10nm, &config);\n'
-          ins = ('\t{\n'
-                 '\t\tu32 od = dsi_phy_read(pll_10nm->phy->pll_base +\n'
-                 '\t\t\tREG_DSI_10nm_PHY_PLL_PLL_OUTDIV_RATE);\n'
-                 '\n'
-                 '\t\tpr_info("dsi_pll: outdiv 0x%x -> 0x1 (vco=%lu)\\n",\n'
-                 '\t\t\tod, pll_10nm->vco_current_rate);\n'
-                 '\t\tdsi_phy_write(pll_10nm->phy->pll_base +\n'
-                 '\t\t\tREG_DSI_10nm_PHY_PLL_PLL_OUTDIV_RATE,\n'
-                 '\t\t\t(od & ~0x3) | 0x1);\n'
-                 '\t}\n')
-          assert ph.count(anc) == 1, ph.count(anc)
-          ph = ph.replace(anc, anc + ins, 1)
-          open(pp, "w").write(ph)
-          print("dsi_phy_10nm outdiv /2 forced")
-          print("dsi_host seq log + TE gate + frame counter patched")
+          print("dsi_host quiet log + recovery patched")
           PYEOF
-          grep -n 'jdi_fill_full\|jdi_fill64x4\|late start' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -8
-          grep -n 'dsi_frm %d\|te_gate_wr_mem\|dsi_timing: cmd' drivers/gpu/drm/msm/dsi/dsi_host.c | head -6
-          grep -n 'outdiv 0x%x' drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c | head -3
+          grep -n 'jdi_page0\|page0_fix' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -6
+          grep -n 'dsi_seq %03d\|dsi_timing: cmd\|dsi_op_mode:' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
+          grep -n 'test_fill\|jdi_probe_fill\|jdi_fill_full' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -5 || true
 
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
@@ -929,7 +750,7 @@ jobs:
           secondaddr = 0x00F00000
           tagsaddr = 0x00000100
           name = sagit-archlinux
-          cmdline = console=ttyMSM0,115200n8 root=/dev/sda17 rw rootwait rootfstype=ext4 earlycon panic=30
+          cmdline = console=ttyMSM0,115200n8 consoleblank=0 root=/dev/sda17 rw rootwait rootfstype=ext4 earlycon panic=30
           CFGEOF
           abootimg --create /tmp/boot.img -f /tmp/bootimg.cfg -k Image.gz-dtb -r /tmp/initramfs.gz
           abootimg -i /tmp/boot.img
