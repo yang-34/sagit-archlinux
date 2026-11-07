@@ -353,7 +353,7 @@ jobs:
               "}\n"
               "\n")
 
-          anchor = "static int jdi_fhd_r63452_on(struct mipi_dsi_device *dsi)\n"
+          anchor = "static int jdi_fhd_r63452_on(struct jdi_fhd_r63452 *ctx)\n"
           assert s.count(anchor) == 1, s.count(anchor)
           s = s.replace(anchor, helper + anchor, 1)
 
