@@ -292,7 +292,7 @@ jobs:
           grep -n 'force_vendor_dphy_timing' drivers/gpu/drm/msm/dsi/phy/dsi_phy.c | head -5
           grep -n 'dsi_te' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
 
-      - name: DCS test fill into panel GRAM (build-75, bypasses DPU)
+      - name: DCS test fill v2, chunked WR_MEM (build-76, bypasses DPU)
         run: |
           cd kernel
           python3 - <<'PYEOF'
@@ -308,47 +308,66 @@ jobs:
               "MODULE_PARM_DESC(test_fill,\n"
               "\t\t \"DCS-fill a red band into panel GRAM (bypasses DPU)\");\n"
               "\n"
+              "#define FILL_ROWS 96\n"
+              "#define FILL_CHUNK_PX 16\n"
+              "\n"
+              "static int jdi_fill_chunk(struct mipi_dsi_device *dsi, u8 cmd,\n"
+              "\t\t\t\t u8 *buf, int len)\n"
+              "{\n"
+              "\tint tries, ret = -1;\n"
+              "\n"
+              "\tfor (tries = 0; tries < 3; tries++) {\n"
+              "\t\tret = mipi_dsi_dcs_write(dsi, cmd, buf, len);\n"
+              "\t\tif (ret >= 0)\n"
+              "\t\t\treturn 0;\n"
+              "\t\tmsleep(3);\n"
+              "\t}\n"
+              "\treturn ret;\n"
+              "}\n"
+              "\n"
               "static void jdi_fhd_r63452_test_fill(struct mipi_dsi_device *dsi)\n"
               "{\n"
-              "\tu8 col[] = { 0x00, 0x00, 0x04, 0x37 };\n"
-              "\tu8 page[] = { 0x00, 0x00, 0x00, 0xff };\n"
+              "\tint px_bytes = FILL_CHUNK_PX * 3;\n"
               "\tu8 *buf;\n"
-              "\tint i, rows, ret;\n"
+              "\tint row, off, len, ret = 0;\n"
               "\n"
-              "\tbuf = kzalloc(1080 * 3, GFP_KERNEL);\n"
+              "\tbuf = kzalloc(px_bytes, GFP_KERNEL);\n"
               "\tif (!buf)\n"
               "\t\treturn;\n"
-              "\tfor (i = 0; i < 1080 * 3; i += 3) {\n"
-              "\t\tbuf[i] = 0xff;\n"
-              "\t\tbuf[i + 1] = 0x00;\n"
-              "\t\tbuf[i + 2] = 0x00;\n"
+              "\tfor (off = 0; off < px_bytes; off += 3) {\n"
+              "\t\tbuf[off] = 0xff;\n"
+              "\t\tbuf[off + 1] = 0x00;\n"
+              "\t\tbuf[off + 2] = 0x00;\n"
               "\t}\n"
               "\n"
-              "\tret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_COLUMN_ADDRESS,\n"
-              "\t\t\t\t col, sizeof(col));\n"
-              "\tif (ret < 0) {\n"
-              "\t\tpr_err(\"panel: test_fill column ret=%d\\n\", ret);\n"
-              "\t\tgoto out;\n"
-              "\t}\n"
-              "\tret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_PAGE_ADDRESS,\n"
-              "\t\t\t\t page, sizeof(page));\n"
-              "\tif (ret < 0) {\n"
-              "\t\tpr_err(\"panel: test_fill page ret=%d\\n\", ret);\n"
-              "\t\tgoto out;\n"
-              "\t}\n"
+              "\tfor (row = 0; row < FILL_ROWS && ret == 0; row++) {\n"
+              "\t\tu8 page[4] = { 0x00, row, 0x00, row };\n"
+              "\t\tu8 col[4] = { 0x00, 0x00, 0x04, 0x37 };\n"
               "\n"
-              "\tfor (rows = 0; rows < 256; rows++) {\n"
-              "\t\tret = mipi_dsi_dcs_write(dsi,\n"
-              "\t\t\t\trows ? MIPI_DCS_WRITE_MEMORY_CONTINUE :\n"
-              "\t\t\t\t       MIPI_DCS_WRITE_MEMORY_START,\n"
-              "\t\t\t\tbuf, 1080 * 3);\n"
-              "\t\tif (ret < 0) {\n"
-              "\t\t\tpr_err(\"panel: test_fill row %d ret=%d\\n\", rows, ret);\n"
+              "\t\tret = jdi_fill_chunk(dsi, MIPI_DCS_SET_PAGE_ADDRESS,\n"
+              "\t\t\t\t\t page, sizeof(page));\n"
+              "\t\tif (ret)\n"
               "\t\t\tbreak;\n"
+              "\t\tret = jdi_fill_chunk(dsi, MIPI_DCS_SET_COLUMN_ADDRESS,\n"
+              "\t\t\t\t\t col, sizeof(col));\n"
+              "\t\tif (ret)\n"
+              "\t\t\tbreak;\n"
+              "\t\tfor (off = 0; off < 1080 * 3; off += len) {\n"
+              "\t\t\tlen = 1080 * 3 - off;\n"
+              "\t\t\tif (len > px_bytes)\n"
+              "\t\t\t\tlen = px_bytes;\n"
+              "\t\t\tret = jdi_fill_chunk(dsi,\n"
+              "\t\t\t\t\toff ? MIPI_DCS_WRITE_MEMORY_CONTINUE :\n"
+              "\t\t\t\t\t      MIPI_DCS_WRITE_MEMORY_START,\n"
+              "\t\t\t\t\tbuf, len);\n"
+              "\t\t\tif (ret) {\n"
+              "\t\t\t\tpr_err(\"panel: test_fill row %d off %d ret=%d\\n\",\n"
+              "\t\t\t\t       row, off, ret);\n"
+              "\t\t\t\tbreak;\n"
+              "\t\t\t}\n"
               "\t\t}\n"
               "\t}\n"
-              "\tpr_info(\"panel: test_fill done rows=%d ret=%d\\n\", rows, ret);\n"
-              "out:\n"
+              "\tpr_info(\"panel: test_fill done rows=%d ret=%d\\n\", row, ret);\n"
               "\tkfree(buf);\n"
               "}\n"
               "\n")
@@ -361,9 +380,9 @@ jobs:
           j = s.index("\n", i) + 1
           s = s[:j] + "\tif (test_fill)\n\t\tjdi_fhd_r63452_test_fill(dsi);\n" + s[j:]
           open(p, "w").write(s)
-          print("test_fill patched")
+          print("test_fill v2 patched")
           PYEOF
-          grep -n 'test_fill' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -8
+          grep -n 'FILL_ROWS\|test_fill done' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -6
 
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
