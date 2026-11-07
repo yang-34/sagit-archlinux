@@ -513,6 +513,19 @@ jobs:
                      '\t\tn > 1 ? p[1] : 0, n > 2 ? p[2] : 0,\n'
                      '\t\tn > 3 ? p[3] : 0, n > 4 ? p[4] : 0);\n'
                      '}\n'
+                     '\n'
+                     'static void dsi_dump_state(struct msm_dsi_host *msm_host,\n'
+                     '\t\t\t  const char *tag)\n'
+                     '{\n'
+                     '\tpr_info("dsi_state %s: ctrl=0x%08x cfg0=0x%08x cfg1=0x%08x mdp0=0x%08x trig=0x%08x dma=0x%08x\\n",\n'
+                     '\t\ttag,\n'
+                     '\t\tdsi_read(msm_host, REG_DSI_CTRL),\n'
+                     '\t\tdsi_read(msm_host, REG_DSI_CMD_CFG0),\n'
+                     '\t\tdsi_read(msm_host, REG_DSI_CMD_CFG1),\n'
+                     '\t\tdsi_read(msm_host, REG_DSI_CMD_MDP_STREAM0_CTRL),\n'
+                     '\t\tdsi_read(msm_host, REG_DSI_TRIG_CTRL),\n'
+                     '\t\tdsi_read(msm_host, REG_DSI_CMD_DMA_CTRL));\n'
+                     '}\n'
                      '\n')
 
           anchor2 = 'static ssize_t dsi_host_transfer(struct mipi_dsi_host *host,\n'
@@ -522,7 +535,12 @@ jobs:
           old2 = ('\tif (!msg || !msm_host->power_on)\n'
                   '\t\treturn -EINVAL;\n'
                   '\n'
-                  '\tmutex_lock(&msm_host->cmd_mutex);\n')
+                  '\tmutex_lock(&msm_host->cmd_mutex);\n'
+                  '\tret = msm_dsi_manager_cmd_xfer(msm_host->id, msg);\n'
+                  '\tmutex_unlock(&msm_host->cmd_mutex);\n'
+                  '\n'
+                  '\treturn ret;\n'
+                  '}\n')
           new2 = ('\tif (!msg || !msm_host->power_on)\n'
                   '\t\treturn -EINVAL;\n'
                   '\n'
@@ -536,7 +554,18 @@ jobs:
                   '\t\t\tatomic_read(&msm_host->te_count));\n'
                   '\t}\n'
                   '\n'
-                  '\tmutex_lock(&msm_host->cmd_mutex);\n')
+                  '\tmutex_lock(&msm_host->cmd_mutex);\n'
+                  '\tret = msm_dsi_manager_cmd_xfer(msm_host->id, msg);\n'
+                  '\tif (ret < 0 && msg->tx_len > 0) {\n'
+                  '\t\tpr_err("dsi_recover: xfer err %d cmd=%02x, sw_reset\\n",\n'
+                  '\t\t\tret, ((const u8 *)msg->tx_buf)[0]);\n'
+                  '\t\tdsi_sw_reset_restore(msm_host);\n'
+                  '\t\tdsi_dump_state(msm_host, "recover");\n'
+                  '\t}\n'
+                  '\tmutex_unlock(&msm_host->cmd_mutex);\n'
+                  '\n'
+                  '\treturn ret;\n'
+                  '}\n')
           assert h.count(old2) == 1, h.count(old2)
           h = h.replace(old2, new2, 1)
 
@@ -570,6 +599,11 @@ jobs:
                    '\tdsi_ctrl = dsi_read(msm_host, REG_DSI_CTRL);\n')
           assert h.count(oldop) == 1, h.count(oldop)
           h = h.replace(oldop, newop, 1)
+
+          oldpw = '\tdsi_ctrl_config(msm_host, true, phy_shared_timings, phy);\n'
+          newpw = oldpw + '\tdsi_dump_state(msm_host, "power_on");\n'
+          assert h.count(oldpw) == 1, h.count(oldpw)
+          h = h.replace(oldpw, newpw, 1)
           open(hp, "w").write(h)
 
           pp = "drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c"
