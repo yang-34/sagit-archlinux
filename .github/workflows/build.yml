@@ -450,7 +450,7 @@ jobs:
           grep -n 'dsi_seq %03d\|dsi_timing: cmd\|dsi_op_mode:' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
           grep -n 'test_fill\|jdi_probe_fill\|jdi_fill_full' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -5 || true
 
-      - name: Probe committed plane fb pixels (build-83)
+      - name: Probe committed plane fb pixels (build-84, module param)
         run: |
           cd kernel
           python3 - <<'PYEOF'
@@ -462,35 +462,44 @@ jobs:
 
           p = "drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c"
           patch(p, '#include "msm_drv.h"\n',
+                '#include <linux/module.h>\n'
+                '#include <drm/drm_framebuffer.h>\n'
                 '#include "msm_drv.h"\n#include "msm_gem.h"\n')
 
           helper = r"""
-          static int dpu_probe_fb_seq;
+          static int fb_probe;
+          module_param_named(fb_probe, fb_probe, int, 0644);
+          MODULE_PARM_DESC(fb_probe, "log committed plane fb contents (0=off)");
 
-          static void dpu_probe_fb(struct drm_framebuffer *fb)
+          static int dpu_probe_seq;
+          static int dpu_probe_base_id = -1;
+          static int dpu_probe_base_prints;
+          static struct drm_framebuffer *dpu_probe_late_fb;
+
+          static void dpu_dump_fb(struct drm_framebuffer *fb, const char *tag,
+                                  int seq)
           {
               void *addr;
               u32 *p;
               unsigned int x, y, pitch, nsamp = 0, nblack = 0;
               u32 first[8] = { 0 };
+              u32 flags = 0;
               int i;
-
-              if (!fb || !fb->obj[0] || dpu_probe_fb_seq >= 16)
-                  return;
-              dpu_probe_fb_seq++;
 
               addr = msm_gem_get_vaddr(fb->obj[0]);
               if (!addr) {
-                  pr_info("dpu_fb %d: no vaddr id=%d\n",
-                          dpu_probe_fb_seq, fb->base.id);
+                  pr_info("dpu_fb %s %d: no vaddr id=%d\n",
+                          tag, seq, fb->base.id);
                   return;
               }
+              if (!fb->obj[0]->import_attach)
+                  flags = to_msm_bo(fb->obj[0])->flags;
               p = addr;
               pitch = fb->pitches[0] / 4;
               for (i = 0; i < 8; i++)
                   first[i] = p[i];
-              for (y = 0; y < fb->height; y += 16) {
-                  for (x = 0; x < fb->width; x += 16) {
+              for (y = 0; y < fb->height; y += 32) {
+                  for (x = 0; x < fb->width; x += 32) {
                       u32 v = p[y * pitch + x];
 
                       nsamp++;
@@ -498,13 +507,41 @@ jobs:
                           nblack++;
                   }
               }
-              pr_info("dpu_fb %d: id=%d fmt=%08x mod=%llx %ux%u pitch=%u nonblack=%u/%u px=%08x %08x %08x %08x %08x %08x %08x %08x\n",
-                      dpu_probe_fb_seq, fb->base.id, fb->format->format,
+              pr_info("dpu_fb %s %d: id=%d fl=%08x fmt=%08x mod=%llx %ux%u pitch=%u nonblack=%u/%u px=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+                      tag, seq, fb->base.id, flags, fb->format->format,
                       (unsigned long long)fb->modifier,
                       fb->width, fb->height, fb->pitches[0], nblack, nsamp,
                       first[0], first[1], first[2], first[3],
                       first[4], first[5], first[6], first[7]);
               msm_gem_put_vaddr(fb->obj[0]);
+          }
+
+          static void dpu_probe_fb(struct drm_framebuffer *fb)
+          {
+              if (!fb_probe || !fb || !fb->obj[0])
+                  return;
+
+              if (dpu_probe_base_id < 0)
+                  dpu_probe_base_id = fb->base.id;
+
+              if (fb->base.id == dpu_probe_base_id) {
+                  if (++dpu_probe_base_prints > 3)
+                      return;
+              } else {
+                  dpu_probe_seq++;
+                  if (dpu_probe_seq > 400)
+                      return;
+                  if (dpu_probe_seq == 30 && !dpu_probe_late_fb) {
+                      dpu_probe_late_fb = fb;
+                      drm_framebuffer_get(fb);
+                  }
+                  if (dpu_probe_seq == 60 && dpu_probe_late_fb) {
+                      dpu_dump_fb(dpu_probe_late_fb, "late", 0);
+                      drm_framebuffer_put(dpu_probe_late_fb);
+                      dpu_probe_late_fb = NULL;
+                  }
+              }
+              dpu_dump_fb(fb, "now", dpu_probe_seq);
           }
 
           """
@@ -528,7 +565,8 @@ jobs:
           open(p, "w").write(s.replace(old, new, 1))
           print("dpu fb pixel probe inserted")
           PYEOF
-          grep -n 'dpu_probe_fb' drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c | head -6
+          grep -n 'module_param_named(fb_probe' drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
+          grep -n 'dpu_probe_fb' drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c | head -8
 
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
