@@ -357,10 +357,9 @@ jobs:
           assert s.count(anchor) == 1, s.count(anchor)
           s = s.replace(anchor, helper + anchor, 1)
 
-          old = ("\tdsi->mode_flags &= ~MIPI_DSI_MODE_LPM;\n"
-                 "\tpr_info(\"panel: flags_out=0x%lx\\n\", dsi->mode_flags);\n")
-          assert s.count(old) == 1, s.count(old)
-          s = s.replace(old, old + "\tif (test_fill)\n\t\tjdi_fhd_r63452_test_fill(dsi);\n", 1)
+          i = s.index('pr_info("panel: flags_out=')
+          j = s.index("\n", i) + 1
+          s = s[:j] + "\tif (test_fill)\n\t\tjdi_fhd_r63452_test_fill(dsi);\n" + s[j:]
           open(p, "w").write(s)
           print("test_fill patched")
           PYEOF
