@@ -450,6 +450,86 @@ jobs:
           grep -n 'dsi_seq %03d\|dsi_timing: cmd\|dsi_op_mode:' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
           grep -n 'test_fill\|jdi_probe_fill\|jdi_fill_full' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -5 || true
 
+      - name: Probe committed plane fb pixels (build-83)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:60])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          p = "drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c"
+          patch(p, '#include "msm_drv.h"\n',
+                '#include "msm_drv.h"\n#include "msm_gem.h"\n')
+
+          helper = r"""
+          static int dpu_probe_fb_seq;
+
+          static void dpu_probe_fb(struct drm_framebuffer *fb)
+          {
+              void *addr;
+              u32 *p;
+              unsigned int x, y, pitch, nsamp = 0, nblack = 0;
+              u32 first[8] = { 0 };
+              int i;
+
+              if (!fb || !fb->obj[0] || dpu_probe_fb_seq >= 16)
+                  return;
+              dpu_probe_fb_seq++;
+
+              addr = msm_gem_get_vaddr(fb->obj[0]);
+              if (!addr) {
+                  pr_info("dpu_fb %d: no vaddr id=%d\n",
+                          dpu_probe_fb_seq, fb->base.id);
+                  return;
+              }
+              p = addr;
+              pitch = fb->pitches[0] / 4;
+              for (i = 0; i < 8; i++)
+                  first[i] = p[i];
+              for (y = 0; y < fb->height; y += 16) {
+                  for (x = 0; x < fb->width; x += 16) {
+                      u32 v = p[y * pitch + x];
+
+                      nsamp++;
+                      if (v & 0x00ffffff)
+                          nblack++;
+                  }
+              }
+              pr_info("dpu_fb %d: id=%d fmt=%08x mod=%llx %ux%u pitch=%u nonblack=%u/%u px=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+                      dpu_probe_fb_seq, fb->base.id, fb->format->format,
+                      (unsigned long long)fb->modifier,
+                      fb->width, fb->height, fb->pitches[0], nblack, nsamp,
+                      first[0], first[1], first[2], first[3],
+                      first[4], first[5], first[6], first[7]);
+              msm_gem_put_vaddr(fb->obj[0]);
+          }
+
+          """
+
+          anchor = "static void dpu_plane_atomic_update(struct drm_plane *plane,\n"
+          assert open(p).read().count(anchor) == 1
+          s = open(p).read().replace(anchor, helper + anchor, 1)
+
+          old = ('\tif (!new_state->visible) {\n'
+               '\t\t_dpu_plane_atomic_disable(plane);\n'
+               '\t} else {\n'
+               '\t\tdpu_plane_sspp_atomic_update(plane);\n'
+               '\t}\n')
+          new = ('\tif (!new_state->visible) {\n'
+               '\t\t_dpu_plane_atomic_disable(plane);\n'
+               '\t} else {\n'
+               '\t\tdpu_probe_fb(new_state->fb);\n'
+               '\t\tdpu_plane_sspp_atomic_update(plane);\n'
+               '\t}\n')
+          assert s.count(old) == 1, s.count(old)
+          open(p, "w").write(s.replace(old, new, 1))
+          print("dpu fb pixel probe inserted")
+          PYEOF
+          grep -n 'dpu_probe_fb' drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c | head -6
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
