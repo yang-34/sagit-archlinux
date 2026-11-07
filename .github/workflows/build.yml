@@ -292,7 +292,7 @@ jobs:
           grep -n 'force_vendor_dphy_timing' drivers/gpu/drm/msm/dsi/phy/dsi_phy.c | head -5
           grep -n 'dsi_te' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
 
-      - name: DCS probe fill v3 page0 + display state + 16x16 (build-77)
+      - name: DCS probe fill v4 fix API + packet dump + TE gate (build-78)
         run: |
           cd kernel
           python3 - <<'PYEOF'
@@ -320,15 +320,8 @@ jobs:
 
           static int jdi_px(struct mipi_dsi_device *dsi, u8 cmd, u8 *buf, int len)
           {
-              struct mipi_dsi_msg msg = {
-                  .channel = dsi->channel,
-                  .type = MIPI_DSI_DCS_LONG_WRITE,
-                  .tx_buf = buf,
-                  .tx_len = len,
-              };
-
               buf[0] = cmd;
-              return mipi_dsi_device_transfer(dsi, &msg);
+              return mipi_dsi_dcs_write_buffer(dsi, buf, len);
           }
 
           static void jdi_probe_fill(struct mipi_dsi_device *dsi)
@@ -339,6 +332,8 @@ jobs:
               u8 *buf;
               int r, i, ret;
 
+              pr_info("panel: fill flags=0x%lx ch=%d lanes=%d fmt=%d\n",
+                      dsi->mode_flags, dsi->channel, dsi->lanes, dsi->format);
               pr_info("panel: probe start\n");
               ret = mipi_dsi_dcs_write(dsi, 0xb0, &page0, 1);
               pr_info("panel: B0=00 ret=%d\n", ret);
@@ -347,13 +342,25 @@ jobs:
               pr_info("panel: 29 ret=%d\n", ret);
               msleep(20);
               jdi_read2(dsi, "post29");
-              ret = mipi_dsi_dcs_write(dsi, 0x13, NULL, 0);
-              pr_info("panel: 13 ret=%d\n", ret);
-              ret = mipi_dsi_dcs_write(dsi, 0x10, NULL, 0);
-              pr_info("panel: 10 ret=%d\n", ret);
-              msleep(20);
+              ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_ENTER_NORMAL_MODE, NULL, 0);
+              pr_info("panel: 13 normal ret=%d\n", ret);
               jdi_read2(dsi, "post13");
+              ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_ENTER_SLEEP_MODE, NULL, 0);
+              pr_info("panel: 10 sleep ret=%d\n", ret);
+              msleep(20);
+              jdi_read2(dsi, "postsleep");
+              ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_EXIT_SLEEP_MODE, NULL, 0);
+              pr_info("panel: 11 wake ret=%d\n", ret);
+              msleep(120);
+              jdi_read2(dsi, "postwake");
+              ret = mipi_dsi_dcs_set_display_on(dsi);
+              pr_info("panel: 29 again ret=%d\n", ret);
+              msleep(20);
+              jdi_read2(dsi, "post29b");
 
+              pr_info("panel: win16 2A=%02x %02x %02x %02x 2B=%02x %02x %02x %02x\n",
+                      col16[0], col16[1], col16[2], col16[3],
+                      page16[0], page16[1], page16[2], page16[3]);
               ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_COLUMN_ADDRESS, col16, 4);
               if (ret >= 0)
                   ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_PAGE_ADDRESS, page16, 4);
@@ -367,6 +374,9 @@ jobs:
                   buf[i + 1] = 0x00;
                   buf[i + 2] = 0x00;
               }
+              buf[0] = MIPI_DCS_WRITE_MEMORY_START;
+              pr_info("panel: px packet len=%d cmd=%02x data=%02x %02x %02x %02x %02x\n",
+                      1 + 16 * 3, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
               for (r = 0; r < 16; r++) {
                   ret = jdi_px(dsi, r ? MIPI_DCS_WRITE_MEMORY_CONTINUE :
                                       MIPI_DCS_WRITE_MEMORY_START,
@@ -378,6 +388,7 @@ jobs:
               }
               pr_info("panel: block16 rows=%d ret=%d\n", r, ret);
               kfree(buf);
+              jdi_read2(dsi, "postfill");
           }
           """
 
@@ -389,9 +400,82 @@ jobs:
           j = s.index("\n", i) + 1
           s = s[:j] + "\tif (test_fill)\n\t\tjdi_probe_fill(dsi);\n" + s[j:]
           open(p, "w").write(s)
-          print("probe fill v3 patched")
+          print("probe fill v4 patched")
+
+          hp = "drivers/gpu/drm/msm/dsi/dsi_host.c"
+          h = open(hp).read()
+
+          inc = '#include <linux/delay.h>\n'
+          assert h.count(inc) == 1
+          h = h.replace(inc, inc + '#include <linux/module.h>\n', 1)
+
+          gate_fn = ('static bool te_gate_wr_mem = true;\n'
+                     'module_param(te_gate_wr_mem, bool, 0644);\n'
+                     '\n'
+                     'static int dsi_wait_te_edge(struct msm_dsi_host *msm_host)\n'
+                     '{\n'
+                     '\tint base = atomic_read(&msm_host->te_count);\n'
+                     '\tint i;\n'
+                     '\n'
+                     '\tfor (i = 0; i < 200; i++) {\n'
+                     '\t\tif (atomic_read(&msm_host->te_count) != base)\n'
+                     '\t\t\treturn 0;\n'
+                     '\t\tusleep_range(200, 300);\n'
+                     '\t}\n'
+                     '\treturn -ETIMEDOUT;\n'
+                     '}\n'
+                     '\n'
+                     'static void dsi_log_dcs_cmd(struct msm_dsi_host *msm_host,\n'
+                     '\t\t\t    const struct mipi_dsi_msg *msg)\n'
+                     '{\n'
+                     '\tconst u8 *p = msg->tx_buf;\n'
+                     '\tint n = msg->tx_len;\n'
+                     '\tu8 c;\n'
+                     '\n'
+                     '\tif (n <= 0 || !p)\n'
+                     '\t\treturn;\n'
+                     '\tc = p[0];\n'
+                     '\tif (c != 0x2a && c != 0x2b && c != 0x2c &&\n'
+                     '\t    c != 0x29 && c != 0xb0)\n'
+                     '\t\treturn;\n'
+                     '\n'
+                     '\tpr_info("dsi_xfer: cmd=%02x type=%02x vc=%02x len=%d te=%d data=%02x %02x %02x %02x %02x\\n",\n'
+                     '\t\tc, msg->type, msg->channel, n,\n'
+                     '\t\tatomic_read(&msm_host->te_count), p[0],\n'
+                     '\t\tn > 1 ? p[1] : 0, n > 2 ? p[2] : 0,\n'
+                     '\t\tn > 3 ? p[3] : 0, n > 4 ? p[4] : 0);\n'
+                     '}\n'
+                     '\n')
+
+          anchor2 = 'static ssize_t dsi_host_transfer(struct mipi_dsi_host *host,\n'
+          assert h.count(anchor2) == 1, h.count(anchor2)
+          h = h.replace(anchor2, gate_fn + anchor2, 1)
+
+          old2 = ('\tif (!msg || !msm_host->power_on)\n'
+                  '\t\treturn -EINVAL;\n'
+                  '\n'
+                  '\tmutex_lock(&msm_host->cmd_mutex);\n')
+          new2 = ('\tif (!msg || !msm_host->power_on)\n'
+                  '\t\treturn -EINVAL;\n'
+                  '\n'
+                  '\tdsi_log_dcs_cmd(msm_host, msg);\n'
+                  '\n'
+                  '\tif (te_gate_wr_mem && msg->tx_len > 0 &&\n'
+                  '\t    ((const u8 *)msg->tx_buf)[0] == MIPI_DCS_WRITE_MEMORY_START) {\n'
+                  '\t\tint gate = dsi_wait_te_edge(msm_host);\n'
+                  '\n'
+                  '\t\tpr_info("dsi_xfer: te_gate rc=%d te=%d\\n", gate,\n'
+                  '\t\t\tatomic_read(&msm_host->te_count));\n'
+                  '\t}\n'
+                  '\n'
+                  '\tmutex_lock(&msm_host->cmd_mutex);\n')
+          assert h.count(old2) == 1, h.count(old2)
+          h = h.replace(old2, new2, 1)
+          open(hp, "w").write(h)
+          print("dsi_host packet log + TE gate patched")
           PYEOF
-          grep -n 'jdi_probe_fill\|B0=00' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -6
+          grep -n 'jdi_probe_fill\|px packet' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -6
+          grep -n 'dsi_xfer:\|te_gate_wr_mem' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
 
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
