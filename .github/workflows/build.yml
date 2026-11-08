@@ -924,9 +924,67 @@ jobs:
                 "\t}\n"
                 "\n"
                 "\tvma->mapped = false;\n")
+
+          # 3) arm-smmu: rpm resume result ignored at every map/unmap/tlb site
+          a = "drivers/iommu/arm/arm-smmu/arm-smmu.c"
+          patch(a,
+                "static inline void arm_smmu_rpm_put(struct arm_smmu_device *smmu)\n"
+                "{\n"
+                "\tif (pm_runtime_enabled(smmu->dev))\n"
+                "\t\tpm_runtime_put_autosuspend(smmu->dev);\n"
+                "}\n",
+                "static inline void arm_smmu_rpm_put(struct arm_smmu_device *smmu)\n"
+                "{\n"
+                "\tif (pm_runtime_enabled(smmu->dev))\n"
+                "\t\tpm_runtime_put_autosuspend(smmu->dev);\n"
+                "}\n"
+                "\n"
+                "/* BISECT-88d: existing call sites ignore arm_smmu_rpm_get()'s result */\n"
+                "static int arm_smmu_rpm_get_checked(struct arm_smmu_device *smmu,\n"
+                "\t\t\t\t    const char *op, unsigned long iova, size_t size)\n"
+                "{\n"
+                "\tint ret = arm_smmu_rpm_get(smmu);\n"
+                "\n"
+                "\tif (ret)\n"
+                "\t\tpr_err(\"SMMU_RPM_FAIL op=%s iova=%08lx size=%zu ret=%d\\n\",\n"
+                "\t\t       op, iova, size, ret);\n"
+                "\n"
+                "\treturn ret;\n"
+                "}\n")
+
+          patch(a,
+                "\tarm_smmu_rpm_get(smmu);\n"
+                "\tret = ops->map_pages(ops, iova, paddr, pgsize, pgcount, prot, gfp, mapped);\n"
+                "\tarm_smmu_rpm_put(smmu);\n",
+                "\tarm_smmu_rpm_get_checked(smmu, \"map_pages\", iova, pgsize * pgcount);\n"
+                "\tret = ops->map_pages(ops, iova, paddr, pgsize, pgcount, prot, gfp, mapped);\n"
+                "\tarm_smmu_rpm_put(smmu);\n")
+
+          patch(a,
+                "\tarm_smmu_rpm_get(smmu);\n"
+                "\tret = ops->unmap_pages(ops, iova, pgsize, pgcount, iotlb_gather);\n"
+                "\tarm_smmu_rpm_put(smmu);\n",
+                "\tarm_smmu_rpm_get_checked(smmu, \"unmap_pages\", iova, pgsize * pgcount);\n"
+                "\tret = ops->unmap_pages(ops, iova, pgsize, pgcount, iotlb_gather);\n"
+                "\tarm_smmu_rpm_put(smmu);\n")
+
+          patch(a,
+                "\t\tarm_smmu_rpm_get(smmu);\n"
+                "\t\tsmmu_domain->flush_ops->tlb_flush_all(smmu_domain);\n"
+                "\t\tarm_smmu_rpm_put(smmu);\n",
+                "\t\tarm_smmu_rpm_get_checked(smmu, \"flush_all\", 0, 0);\n"
+                "\t\tsmmu_domain->flush_ops->tlb_flush_all(smmu_domain);\n"
+                "\t\tarm_smmu_rpm_put(smmu);\n")
+
+          patch(a,
+                "\tarm_smmu_rpm_get(smmu);\n"
+                "\tif (smmu->version == ARM_SMMU_V2 ||\n",
+                "\tarm_smmu_rpm_get_checked(smmu, \"iotlb_sync\", 0, 0);\n"
+                "\tif (smmu->version == ARM_SMMU_V2 ||\n")
           PYEOF
           grep -n 'UNMAP_FAIL\|UNMAP_RETRY\|msm_debug_unmap' drivers/gpu/drm/msm/msm_iommu.c | head -6
           grep -n 'PURGE_FAIL' drivers/gpu/drm/msm/msm_gem_vma.c | head -3
+          grep -n 'SMMU_RPM_FAIL\|arm_smmu_rpm_get_checked' drivers/iommu/arm/arm-smmu/arm-smmu.c | head -8
 
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
