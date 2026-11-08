@@ -450,261 +450,31 @@ jobs:
           grep -n 'dsi_seq %03d\|dsi_timing: cmd\|dsi_op_mode:' drivers/gpu/drm/msm/dsi/dsi_host.c | head -8
           grep -n 'test_fill\|jdi_probe_fill\|jdi_fill_full' drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c | head -5 || true
 
-      - name: Probe committed plane fb pixels (build-84, module param)
+      - name: Accept MSM_BO_CACHED_COHERENT on non-coherent platforms (build-87)
         run: |
           cd kernel
           python3 - <<'PYEOF'
-          def patch(path, old, new):
-              s = open(path).read()
-              assert s.count(old) == 1, (path, s.count(old), old[:60])
-              open(path, "w").write(s.replace(old, new, 1))
-              print("patched", path)
-
-          p = "drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c"
-          patch(p, '#include "msm_drv.h"\n',
-                '#include <linux/module.h>\n'
-                '#include <drm/drm_framebuffer.h>\n'
-                '#include "msm_drv.h"\n#include "msm_gem.h"\n')
-
-          helper = r"""
-          static int fb_probe;
-          module_param_named(fb_probe, fb_probe, int, 0644);
-          MODULE_PARM_DESC(fb_probe, "log committed plane fb contents (0=off)");
-
-          static int dpu_probe_seq;
-          static int dpu_probe_base_id = -1;
-          static int dpu_probe_base_prints;
-          static struct drm_framebuffer *dpu_probe_late_fb;
-
-          static void dpu_dump_fb(struct drm_framebuffer *fb, const char *tag,
-                                  int seq)
-          {
-              void *addr;
-              u32 *p;
-              unsigned int x, y, pitch, nsamp = 0, nblack = 0;
-              u32 first[8] = { 0 };
-              u32 flags = 0;
-              int i;
-
-              addr = msm_gem_get_vaddr(fb->obj[0]);
-              if (!addr) {
-                  pr_info("dpu_fb %s %d: no vaddr id=%d\n",
-                          tag, seq, fb->base.id);
-                  return;
-              }
-              if (!fb->obj[0]->import_attach)
-                  flags = to_msm_bo(fb->obj[0])->flags;
-              p = addr;
-              pitch = fb->pitches[0] / 4;
-              for (i = 0; i < 8; i++)
-                  first[i] = p[i];
-              for (y = 0; y < fb->height; y += 32) {
-                  for (x = 0; x < fb->width; x += 32) {
-                      u32 v = p[y * pitch + x];
-
-                      nsamp++;
-                      if (v & 0x00ffffff)
-                          nblack++;
-                  }
-              }
-              pr_info("dpu_fb %s %d: id=%d fl=%08x fmt=%08x mod=%llx %ux%u pitch=%u nonblack=%u/%u px=%08x %08x %08x %08x %08x %08x %08x %08x\n",
-                      tag, seq, fb->base.id, flags, fb->format->format,
-                      (unsigned long long)fb->modifier,
-                      fb->width, fb->height, fb->pitches[0], nblack, nsamp,
-                      first[0], first[1], first[2], first[3],
-                      first[4], first[5], first[6], first[7]);
-              msm_gem_put_vaddr(fb->obj[0]);
-          }
-
-          static void dpu_probe_fb(struct drm_framebuffer *fb)
-          {
-              if (!fb_probe || !fb || !fb->obj[0])
-                  return;
-
-              if (dpu_probe_base_id < 0)
-                  dpu_probe_base_id = fb->base.id;
-
-              if (fb->base.id == dpu_probe_base_id) {
-                  if (++dpu_probe_base_prints > 3)
-                      return;
-              } else {
-                  dpu_probe_seq++;
-                  if (dpu_probe_seq > 400)
-                      return;
-                  if (dpu_probe_seq == 30 && !dpu_probe_late_fb) {
-                      dpu_probe_late_fb = fb;
-                      drm_framebuffer_get(fb);
-                  }
-                  if (dpu_probe_seq == 60 && dpu_probe_late_fb) {
-                      dpu_dump_fb(dpu_probe_late_fb, "late", 0);
-                      drm_framebuffer_put(dpu_probe_late_fb);
-                      dpu_probe_late_fb = NULL;
-                  }
-              }
-              dpu_dump_fb(fb, "now", dpu_probe_seq);
-          }
-
-          """
-
-          anchor = "static void dpu_plane_atomic_update(struct drm_plane *plane,\n"
-          assert open(p).read().count(anchor) == 1
-          s = open(p).read().replace(anchor, helper + anchor, 1)
-
-          old = ('\tif (!new_state->visible) {\n'
-               '\t\t_dpu_plane_atomic_disable(plane);\n'
-               '\t} else {\n'
-               '\t\tdpu_plane_sspp_atomic_update(plane);\n'
-               '\t}\n')
-          new = ('\tif (!new_state->visible) {\n'
-               '\t\t_dpu_plane_atomic_disable(plane);\n'
-               '\t} else {\n'
-               '\t\tdpu_probe_fb(new_state->fb);\n'
-               '\t\tdpu_plane_sspp_atomic_update(plane);\n'
-               '\t}\n')
+          p = "drivers/gpu/drm/msm/msm_gem.c"
+          s = open(p).read()
+          old = ("\tcase MSM_BO_CACHED_COHERENT:\n"
+                 "\t\tif (priv->has_cached_coherent)\n"
+                 "\t\t\tbreak;\n"
+                 "\t\tfallthrough;\n")
+          new = ("\tcase MSM_BO_CACHED_COHERENT:\n"
+                 "\t\t/*\n"
+                 "\t\t * BISECT-87: Mesa 26 requests coherent BOs unconditionally on\n"
+                 "\t\t * msm8998.  Accept the flag; msm_obj->flags = flags keeps it,\n"
+                 "\t\t * and msm_gem_map_vma() asks for IOMMU_CACHE, which arm-smmu\n"
+                 "\t\t * clears if cacheable mappings are unsupported.\n"
+                 "\t\t */\n"
+                 "\t\tbreak;\n")
           assert s.count(old) == 1, s.count(old)
           open(p, "w").write(s.replace(old, new, 1))
-          print("dpu fb pixel probe inserted")
+          print("BISECT-87: cached-coherent gate removed")
           PYEOF
-          grep -n 'module_param_named(fb_probe' drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
-          grep -n 'dpu_probe_fb' drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c | head -8
-
-      - name: Pin GPU to max OPP, no freq ramp (build-85)
-        run: |
-          cd kernel
-          python3 - <<'PYEOF'
-          def patch(path, old, new):
-              s = open(path).read()
-              assert s.count(old) == 1, (path, s.count(old), old[:80])
-              open(path, "w").write(s.replace(old, new, 1))
-              print("patched", path)
-
-          p = "drivers/gpu/drm/msm/msm_gpu_devfreq.c"
-
-          # 1) helper: highest OPP frequency
-          old_t = ('static int msm_devfreq_target(struct device *dev, unsigned long *freq,\n'
-                   '\t\tu32 flags)\n')
-          new_t = ('/*\n'
-                   ' * BISECT-85: highest OPP of the GPU.  gfx3d_clk_src transitions\n'
-                   ' * flicker the DSI panel on msm8998, so we keep the clock pinned.\n'
-                   ' */\n'
-                   'static unsigned long msm_devfreq_max_freq(struct msm_gpu *gpu)\n'
-                   '{\n'
-                   '\tstruct device *dev = &gpu->pdev->dev;\n'
-                   '\tstruct dev_pm_opp *opp;\n'
-                   '\tunsigned long freq = ~0UL;\n'
-                   '\n'
-                   '\topp = dev_pm_opp_find_freq_floor(dev, &freq);\n'
-                   '\tif (IS_ERR(opp))\n'
-                   '\t\treturn gpu->fast_rate;\n'
-                   '\n'
-                   '\tfreq = dev_pm_opp_get_freq(opp);\n'
-                   '\tdev_pm_opp_put(opp);\n'
-                   '\n'
-                   '\treturn freq;\n'
-                   '}\n'
-                   '\n'
-                   'static int msm_devfreq_target(struct device *dev, unsigned long *freq,\n'
-                   '\t\tu32 flags)\n')
-          patch(p, old_t, new_t)
-
-          # 2) active: pin to max OPP instead of idle_freq * 2
-          old_a = ('\tif (idle_time > msm_devfreq_profile.polling_ms/2) {\n'
-                   '\t\ttarget_freq *= 2;\n'
-                   '\t}\n'
-                   '\n'
-                   '\tdf->idle_freq = 0;\n')
-          new_a = ('\t/*\n'
-                   '\t * BISECT-85: always jump straight to the highest OPP.\n'
-                   '\t * Stock code doubles idle_freq on every activation, which\n'
-                   '\t * makes gfx3d_clk_src change on nearly every submission.\n'
-                   '\t */\n'
-                   '\ttarget_freq = msm_devfreq_max_freq(gpu);\n'
-                   '\t(void)idle_time;\n'
-                   '\n'
-                   '\tdf->idle_freq = 0;\n')
-          patch(p, old_a, new_a)
-
-          # 3) idle: never clamp down
-          old_i = ('\tif (gpu->clamp_to_idle)\n'
-                   '\t\tmsm_devfreq_target(&gpu->pdev->dev, &target_freq, 0);\n')
-          new_i = ('\t/* BISECT-85: keep the clock at max OPP even while idle */\n'
-                   '\tif (0 && gpu->clamp_to_idle)\n'
-                   '\t\tmsm_devfreq_target(&gpu->pdev->dev, &target_freq, 0);\n')
-          patch(p, old_i, new_i)
-
-          # 4) init: start at max OPP, no idle clamp
-          old_n = '\tmsm_devfreq_profile.initial_freq = gpu->fast_rate;\n'
-          new_n = ('\t/* BISECT-85: boot straight into the highest OPP */\n'
-                   '\tgpu->clamp_to_idle = false;\n'
-                   '\tmsm_devfreq_profile.initial_freq = msm_devfreq_max_freq(gpu);\n')
-          patch(p, old_n, new_n)
-          PYEOF
-          grep -n 'msm_devfreq_max_freq' drivers/gpu/drm/msm/msm_gpu_devfreq.c
-          grep -n 'BISECT-85' drivers/gpu/drm/msm/msm_gpu_devfreq.c
-          grep -n 'dev_pm_opp_find_freq_floor' drivers/gpu/drm/msm/msm_gpu_devfreq.c
-
-      - name: Pin GPU clock at init, keep governor suspended (build-86)
-        run: |
-          cd kernel
-          python3 - <<'PYEOF'
-          def patch(path, old, new):
-              s = open(path).read()
-              assert s.count(old) == 1, (path, s.count(old), old[:80])
-              open(path, "w").write(s.replace(old, new, 1))
-              print("patched", path)
-
-          p = "drivers/gpu/drm/msm/msm_gpu_devfreq.c"
-
-          # 1) max_freq helper: trust gpu->fast_rate (already fastest OPP)
-          old_h = ('\topp = dev_pm_opp_find_freq_floor(dev, &freq);\n'
-                   '\tif (IS_ERR(opp))\n'
-                   '\t\treturn gpu->fast_rate;\n'
-                   '\n'
-                   '\tfreq = dev_pm_opp_get_freq(opp);\n')
-          new_h = ('\t/*\n'
-                   '\t * BISECT-86: gpu->fast_rate is filled by\n'
-                   '\t * adreno_get_pwrlevels() using ULONG_MAX, i.e. the fastest\n'
-                   '\t * OPP.  Prefer it so we do not depend on OPP table state.\n'
-                   '\t */\n'
-                   '\tif (gpu->fast_rate)\n'
-                   '\t\treturn gpu->fast_rate;\n'
-                   '\n'
-                   '\topp = dev_pm_opp_find_freq_floor(dev, &freq);\n'
-                   '\tif (IS_ERR(opp))\n'
-                   '\t\treturn 0;\n'
-                   '\n'
-                   '\tfreq = dev_pm_opp_get_freq(opp);\n')
-          patch(p, old_h, new_h)
-
-          # 2) init: program the hardware clock once, at the fastest OPP
-          old_s = ('\tdevfreq_suspend_device(gpu->devfreq.devfreq);\n'
-                   '\n'
-                   '\tgpu->cooling = ')
-          new_s = ('\tdevfreq_suspend_device(gpu->devfreq.devfreq);\n'
-                   '\n'
-                   '\t/*\n'
-                   '\t * BISECT-86: pin the hardware clock at the fastest OPP.\n'
-                   '\t * The governor stays suspended forever, so nothing can\n'
-                   '\t * ever switch gfx3d_clk_src again.\n'
-                   '\t */\n'
-                   '\tif (gpu->fast_rate) {\n'
-                   '\t\tclk_set_rate(gpu->core_clk, gpu->fast_rate);\n'
-                   '\t\tpr_info("msm_devfreq: pinned core_clk to %u Hz (no ramp)\\n",\n'
-                   '\t\t\tgpu->fast_rate);\n'
-                   '\t}\n'
-                   '\n'
-                   '\tgpu->cooling = ')
-          patch(p, old_s, new_s)
-
-          # 3) resume: never resume the governor
-          old_r = '\tdevfreq_resume_device(gpu->devfreq.devfreq);\n'
-          new_r = ('\t/* BISECT-86: keeper suspended; clock pinned in init */\n'
-                   '\t/* devfreq_resume_device(gpu->devfreq.devfreq); */\n')
-          patch(p, old_r, new_r)
-          PYEOF
-          grep -n 'BISECT-86' drivers/gpu/drm/msm/msm_gpu_devfreq.c
-          grep -n 'pinned core_clk' drivers/gpu/drm/msm/msm_gpu_devfreq.c
-          grep -n 'devfreq_resume_device' drivers/gpu/drm/msm/msm_gpu_devfreq.c || echo "no-resume-device"
+          grep -n -A14 'switch (flags & MSM_BO_CACHE_MASK)' drivers/gpu/drm/msm/msm_gem.c
+          grep -n 'IOMMU_CACHE' drivers/gpu/drm/msm/msm_gem.c
+          grep -n 'MSM_BO_CACHED_COHERENT' include/uapi/drm/msm_drm.h
 
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
@@ -1006,7 +776,7 @@ jobs:
           secondaddr = 0x00F00000
           tagsaddr = 0x00000100
           name = sagit-archlinux
-          cmdline = console=ttyMSM0,115200n8 consoleblank=0 root=/dev/sda17 rw rootwait rootfstype=ext4 earlycon panic=30
+          cmdline = console=ttyMSM0,115200n8 consoleblank=0 root=/dev/sda17 rw rootwait rootfstype=ext4 earlycon panic=30 transparent_hugepage=never
           CFGEOF
           abootimg --create /tmp/boot.img -f /tmp/bootimg.cfg -k Image.gz-dtb -r /tmp/initramfs.gz
           abootimg -i /tmp/boot.img
