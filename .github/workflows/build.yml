@@ -476,6 +476,50 @@ jobs:
           grep -n 'IOMMU_CACHE' drivers/gpu/drm/msm/msm_gem.c
           grep -n 'MSM_BO_CACHED_COHERENT' include/uapi/drm/msm_drm.h
 
+      - name: Cap GPU core clock via module param (build-88a, diagnostic only)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:60])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          g = "drivers/gpu/drm/msm/msm_gpu.c"
+          patch(g, "static int enable_clk(struct msm_gpu *gpu)\n{\n\tif (gpu->core_clk && gpu->fast_rate)\n\t\tclk_set_rate(gpu->core_clk, gpu->fast_rate);\n",
+                "#include <linux/moduleparam.h>\n"
+                "\n"
+                "unsigned long msm_gpu_max_freq;\n"
+                "module_param_named(max_freq, msm_gpu_max_freq, ulong, 0644);\n"
+                "MODULE_PARM_DESC(max_freq, \"cap GPU core clock in Hz (0 = no cap)\");\n"
+                "\n"
+                "static int enable_clk(struct msm_gpu *gpu)\n"
+                "{\n"
+                "\tif (gpu->core_clk && gpu->fast_rate) {\n"
+                "\t\tunsigned long rate = gpu->fast_rate;\n"
+                "\n"
+                "\t\tif (msm_gpu_max_freq && rate > msm_gpu_max_freq)\n"
+                "\t\t\trate = msm_gpu_max_freq;\n"
+                "\n"
+                "\t\tclk_set_rate(gpu->core_clk, rate);\n"
+                "\t}\n")
+
+          d = "drivers/gpu/drm/msm/msm_gpu_devfreq.c"
+          patch(d, "#include <linux/devfreq_cooling.h>\n",
+                "#include <linux/devfreq_cooling.h>\n"
+                "\n"
+                "extern unsigned long msm_gpu_max_freq;\n")
+          patch(d, "\topp = devfreq_recommended_opp(dev, freq, flags);\n",
+                "\tif (msm_gpu_max_freq && *freq > msm_gpu_max_freq)\n"
+                "\t\t*freq = msm_gpu_max_freq;\n"
+                "\n"
+                "\topp = devfreq_recommended_opp(dev, freq, flags);\n")
+          PYEOF
+          grep -n -A10 'msm_gpu_max_freq' drivers/gpu/drm/msm/msm_gpu.c | head -22
+          grep -n -A5 'msm_gpu_max_freq' drivers/gpu/drm/msm/msm_gpu_devfreq.c | head -14
+
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
