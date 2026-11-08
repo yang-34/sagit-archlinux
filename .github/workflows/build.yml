@@ -677,7 +677,9 @@ jobs:
           patch(p, old_h, new_h)
 
           # 2) init: program the hardware clock once, at the fastest OPP
-          old_s = '\tdevfreq_suspend_device(gpu->devfreq.devfreq);\n'
+          old_s = ('\tdevfreq_suspend_device(gpu->devfreq.devfreq);\n'
+                   '\n'
+                   '\tgpu->cooling = ')
           new_s = ('\tdevfreq_suspend_device(gpu->devfreq.devfreq);\n'
                    '\n'
                    '\t/*\n'
@@ -689,7 +691,9 @@ jobs:
                    '\t\tclk_set_rate(gpu->core_clk, gpu->fast_rate);\n'
                    '\t\tpr_info("msm_devfreq: pinned core_clk to %u Hz (no ramp)\\n",\n'
                    '\t\t\tgpu->fast_rate);\n'
-                   '\t}\n')
+                   '\t}\n'
+                   '\n'
+                   '\tgpu->cooling = ')
           patch(p, old_s, new_s)
 
           # 3) resume: never resume the governor
