@@ -818,6 +818,116 @@ jobs:
           grep -n 'SFENCE ' drivers/gpu/drm/scheduler/sched_fence.c | head -8
           grep -n 'GEM free' drivers/gpu/drm/msm/msm_gem.c | head -3
 
+      - name: b88d unmap-result instrumentation (silent stale mapping detection)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:60])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          # 1) msm_iommu: keep the real iommu_unmap() result, warn + retry on mismatch
+          p = "drivers/gpu/drm/msm/msm_iommu.c"
+          patch(p,
+                '#include "msm_drv.h"\n#include "msm_mmu.h"\n',
+                '#include "msm_drv.h"\n#include "msm_mmu.h"\n'
+                '#include <linux/ktime.h>\n#include <linux/moduleparam.h>\n'
+                '#include <linux/pm_runtime.h>\n')
+
+          patch(p,
+                "static int msm_iommu_unmap(struct msm_mmu *mmu, uint64_t iova, size_t len)\n"
+                "{\n"
+                "\tstruct msm_iommu *iommu = to_msm_iommu(mmu);\n"
+                "\n"
+                "\tif (iova & BIT_ULL(48))\n"
+                "\t\tiova |= GENMASK_ULL(63, 49);\n"
+                "\n"
+                "\tiommu_unmap(iommu->domain, iova, len);\n"
+                "\n"
+                "\treturn 0;\n"
+                "}\n",
+                "/*\n"
+                " * BISECT-88d: the upstream 5.15 helper silently discards\n"
+                " * iommu_unmap()'s result and always reports success.  A partial\n"
+                " * or failed unmap leaves a live mapping behind; once the pages\n"
+                " * are freed and reused, the GPU/DPU can still write there.\n"
+                " * Normal path is gated by msm_debug_unmap; failures always print.\n"
+                " */\n"
+                "static bool msm_debug_unmap;\n"
+                "module_param(msm_debug_unmap, bool, 0644);\n"
+                "MODULE_PARM_DESC(msm_debug_unmap, \"log every msm_iommu unmap (normal path)\");\n"
+                "\n"
+                "static int msm_iommu_unmap(struct msm_mmu *mmu, uint64_t iova, size_t len)\n"
+                "{\n"
+                "\tstruct msm_iommu *iommu = to_msm_iommu(mmu);\n"
+                "\tphys_addr_t phys;\n"
+                "\tktime_t t0 = ktime_get();\n"
+                "\tsize_t ret;\n"
+                "\n"
+                "\tif (iova & BIT_ULL(48))\n"
+                "\t\tiova |= GENMASK_ULL(63, 49);\n"
+                "\n"
+                "\tret = iommu_unmap(iommu->domain, iova, len);\n"
+                "\n"
+                "\tif (ret != len) {\n"
+                "\t\tphys = iommu_iova_to_phys(iommu->domain, iova);\n"
+                "\t\tpr_err(\"UNMAP_FAIL dev=%s iova=%09llx len=%zu ret=%zu phys=%pa suspended=%d dt=%lldus\\n\",\n"
+                "\t\t       dev_name(mmu->dev), (unsigned long long)iova, len, ret,\n"
+                "\t\t       &phys, pm_runtime_status_suspended(mmu->dev),\n"
+                "\t\t       ktime_us_delta(ktime_get(), t0));\n"
+                "\n"
+                "\t\tret = iommu_unmap(iommu->domain, iova, len);\n"
+                "\t\tphys = iommu_iova_to_phys(iommu->domain, iova);\n"
+                "\t\tpr_err(\"UNMAP_RETRY dev=%s iova=%09llx len=%zu ret=%zu phys=%pa\\n\",\n"
+                "\t\t       dev_name(mmu->dev), (unsigned long long)iova, len, ret,\n"
+                "\t\t       &phys);\n"
+                "\n"
+                "\t\treturn (ret == len) ? 0 : -EIO;\n"
+                "\t}\n"
+                "\n"
+                "\tif (msm_debug_unmap)\n"
+                "\t\tpr_info(\"UNMAP dev=%s iova=%09llx len=%zu dt=%lldus\\n\",\n"
+                "\t\t       dev_name(mmu->dev), (unsigned long long)iova, len,\n"
+                "\t\t       ktime_us_delta(ktime_get(), t0));\n"
+                "\n"
+                "\treturn 0;\n"
+                "}\n")
+
+          # 2) purge path: surface the failure with aspace name + vma state
+          v = "drivers/gpu/drm/msm/msm_gem_vma.c"
+          patch(v,
+                "\tif (aspace->mmu)\n"
+                "\t\taspace->mmu->funcs->unmap(aspace->mmu, vma->iova, size);\n"
+                "\n"
+                "\tif (msm_debug_vma)\n"
+                "\t\tpr_info(\"VMA unmap %s iova=%09llx size=%u dt=%lldus\\n\",\n"
+                "\t\t\taspace->name ? aspace->name : \"?\",\n"
+                "\t\t\t(unsigned long long)vma->iova, size,\n"
+                "\t\t\tktime_us_delta(ktime_get(), t0));\n"
+                "\n"
+                "\tvma->mapped = false;\n",
+                "\tif (aspace->mmu) {\n"
+                "\t\tint ret = aspace->mmu->funcs->unmap(aspace->mmu, vma->iova, size);\n"
+                "\n"
+                "\t\tif (ret)\n"
+                "\t\t\tpr_err(\"PURGE_FAIL aspace=%s iova=%09llx size=%u ret=%d inuse=%d mapped=%d\\n\",\n"
+                "\t\t\t       aspace->name ? aspace->name : \"?\",\n"
+                "\t\t\t       (unsigned long long)vma->iova, size, ret,\n"
+                "\t\t\t       vma->inuse, vma->mapped);\n"
+                "\t\telse if (msm_debug_vma)\n"
+                "\t\t\tpr_info(\"VMA unmap %s iova=%09llx size=%u dt=%lldus\\n\",\n"
+                "\t\t\t       aspace->name ? aspace->name : \"?\",\n"
+                "\t\t\t       (unsigned long long)vma->iova, size,\n"
+                "\t\t\t       ktime_us_delta(ktime_get(), t0));\n"
+                "\t}\n"
+                "\n"
+                "\tvma->mapped = false;\n")
+          PYEOF
+          grep -n 'UNMAP_FAIL\|UNMAP_RETRY\|msm_debug_unmap' drivers/gpu/drm/msm/msm_iommu.c | head -6
+          grep -n 'PURGE_FAIL' drivers/gpu/drm/msm/msm_gem_vma.c | head -3
+
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
           cd kernel
