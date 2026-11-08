@@ -1175,6 +1175,90 @@ jobs:
           grep -n 'pr_err_ratelimited' mm/swapfile.c | head -4
           grep -n 'SMMU_TLBSYNC_TIMEOUT' drivers/iommu/arm/arm-smmu/arm-smmu.c
 
+      - name: b88f poison writer discrimination (mapcount/mapping + page-shape + skip-dpu control)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:70])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          g = "drivers/gpu/drm/msm/msm_gem.c"
+
+          # 1) new control param: skip quarantine for BOs with a non-gpu (dpu) vma
+          patch(g,
+                'MODULE_PARM_DESC(msm_quarantine_ms,\n'
+                '\t\t "quarantine freed BO pages for N ms and check for writes (0=off)");\n',
+                'MODULE_PARM_DESC(msm_quarantine_ms,\n'
+                '\t\t "quarantine freed BO pages for N ms and check for writes (0=off)");\n'
+                '\n'
+                'static bool msm_quarantine_skip_dpu;\n'
+                'module_param(msm_quarantine_skip_dpu, bool, 0644);\n'
+                'MODULE_PARM_DESC(msm_quarantine_skip_dpu,\n'
+                '\t\t "skip quarantine for BOs that have a non-gpu (dpu) vma");\n')
+
+          # 2) pre-scan vmas: honour skip_dpu before stealing pages
+          patch(g,
+                '\tif (obj->size > MSM_QENC_MAX_BYTES)\n'
+                '\t\treturn false;\n'
+                '\tif (atomic_inc_return(&msm_qenc_inflight) > MSM_QENC_MAX) {\n',
+                '\tif (obj->size > MSM_QENC_MAX_BYTES)\n'
+                '\t\treturn false;\n'
+                '\tif (msm_quarantine_skip_dpu) {\n'
+                '\t\tu32 other = 0;\n'
+                '\n'
+                '\t\tlist_for_each_entry(vma, &msm_obj->vmas, list) {\n'
+                '\t\t\tif (vma->aspace && vma->aspace->name &&\n'
+                '\t\t\t    strcmp(vma->aspace->name, "gpu"))\n'
+                '\t\t\t\tother++;\n'
+                '\t\t\t}\n'
+                '\t\tif (other)\n'
+                '\t\t\treturn false;\n'
+                '\t}\n'
+                '\tif (atomic_inc_return(&msm_qenc_inflight) > MSM_QENC_MAX) {\n')
+
+          # 3) richer hit report: page shape + CPU-mapping evidence
+          patch(g,
+                '\t\tfor (j = 0; j + 4 < PAGE_SIZE; j += 4) {\n'
+                '\t\t\tif (*(u32 *)(v + j) != 0xA5A5A5A5u)\n'
+                '\t\t\t\tbreak;\n'
+                '\t\t}\n'
+                '\t\tif (j + 4 < PAGE_SIZE)\n'
+                '\t\t\tpr_err("POISON_HIT name=%s page=%u off=%u bytes=%02x%02x%02x%02x flags=%08x gpu_vma=%u dpu_vma=%u mapped=%u inuse=%u\\n",\n'
+                '\t\t\t       q->name, i, j, v[j], v[j + 1], v[j + 2], v[j + 3],\n'
+                '\t\t\t       q->flags, q->vma_gpu, q->vma_dpu, q->vma_mapped,\n'
+                '\t\t\t       q->vma_inuse);\n',
+                '\t\t{\n'
+                '\t\t\tunsigned mod_words = 0, first_other = 0;\n'
+                '\t\t\tbool have_other = false;\n'
+                '\n'
+                '\t\t\tfor (j = 0; j + 4 < PAGE_SIZE; j += 4) {\n'
+                '\t\t\t\tif (*(u32 *)(v + j) != 0xA5A5A5A5u) {\n'
+                '\t\t\t\t\tmod_words++;\n'
+                '\t\t\t\t\tif (!have_other) {\n'
+                '\t\t\t\t\t\tfirst_other = j;\n'
+                '\t\t\t\t\t\thave_other = true;\n'
+                '\t\t\t\t\t}\n'
+                '\t\t\t\t}\n'
+                '\t\t\t}\n'
+                '\t\t\tif (mod_words)\n'
+                '\t\t\t\tpr_err("POISON_HIT name=%s page=%u off=%u mod_words=%u off0_only=%d bytes=%02x%02x%02x%02x%02x%02x%02x%02x flags=%08x gpu_vma=%u dpu_vma=%u mapped=%u inuse=%u mapcount=%d refcount=%d mapping=%px anon=%d\\n",\n'
+                '\t\t\t\t       q->name, i, first_other, mod_words,\n'
+                '\t\t\t\t       (mod_words == 1 && first_other == 0) ? 1 : 0,\n'
+                '\t\t\t\t       v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],\n'
+                '\t\t\t\t       q->flags, q->vma_gpu, q->vma_dpu, q->vma_mapped,\n'
+                '\t\t\t\t       q->vma_inuse,\n'
+                '\t\t\t\t       page_mapcount(q->pages[i]),\n'
+                '\t\t\t\t       page_ref_count(q->pages[i]),\n'
+                '\t\t\t\t       page_mapping(q->pages[i]),\n'
+                '\t\t\t\t       PageAnon(q->pages[i]) ? 1 : 0);\n'
+                '\t\t}\n')
+          PYEOF
+          grep -n 'msm_quarantine_skip_dpu' drivers/gpu/drm/msm/msm_gem.c | head -4
+          grep -n 'mod_words\|mapcount' drivers/gpu/drm/msm/msm_gem.c | head -6
+
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
           cd kernel
