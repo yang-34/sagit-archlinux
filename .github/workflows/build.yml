@@ -643,6 +643,65 @@ jobs:
           grep -n 'BISECT-85' drivers/gpu/drm/msm/msm_gpu_devfreq.c
           grep -n 'dev_pm_opp_find_freq_floor' drivers/gpu/drm/msm/msm_gpu_devfreq.c
 
+      - name: Pin GPU clock at init, keep governor suspended (build-86)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:80])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          p = "drivers/gpu/drm/msm/msm_gpu_devfreq.c"
+
+          # 1) max_freq helper: trust gpu->fast_rate (already fastest OPP)
+          old_h = ('\topp = dev_pm_opp_find_freq_floor(dev, &freq);\n'
+                   '\tif (IS_ERR(opp))\n'
+                   '\t\treturn gpu->fast_rate;\n'
+                   '\n'
+                   '\tfreq = dev_pm_opp_get_freq(opp);\n')
+          new_h = ('\t/*\n'
+                   '\t * BISECT-86: gpu->fast_rate is filled by\n'
+                   '\t * adreno_get_pwrlevels() using ULONG_MAX, i.e. the fastest\n'
+                   '\t * OPP.  Prefer it so we do not depend on OPP table state.\n'
+                   '\t */\n'
+                   '\tif (gpu->fast_rate)\n'
+                   '\t\treturn gpu->fast_rate;\n'
+                   '\n'
+                   '\topp = dev_pm_opp_find_freq_floor(dev, &freq);\n'
+                   '\tif (IS_ERR(opp))\n'
+                   '\t\treturn 0;\n'
+                   '\n'
+                   '\tfreq = dev_pm_opp_get_freq(opp);\n')
+          patch(p, old_h, new_h)
+
+          # 2) init: program the hardware clock once, at the fastest OPP
+          old_s = '\tdevfreq_suspend_device(gpu->devfreq.devfreq);\n'
+          new_s = ('\tdevfreq_suspend_device(gpu->devfreq.devfreq);\n'
+                   '\n'
+                   '\t/*\n'
+                   '\t * BISECT-86: pin the hardware clock at the fastest OPP.\n'
+                   '\t * The governor stays suspended forever, so nothing can\n'
+                   '\t * ever switch gfx3d_clk_src again.\n'
+                   '\t */\n'
+                   '\tif (gpu->fast_rate) {\n'
+                   '\t\tclk_set_rate(gpu->core_clk, gpu->fast_rate);\n'
+                   '\t\tpr_info("msm_devfreq: pinned core_clk to %u Hz (no ramp)\\n",\n'
+                   '\t\t\tgpu->fast_rate);\n'
+                   '\t}\n')
+          patch(p, old_s, new_s)
+
+          # 3) resume: never resume the governor
+          old_r = '\tdevfreq_resume_device(gpu->devfreq.devfreq);\n'
+          new_r = ('\t/* BISECT-86: keeper suspended; clock pinned in init */\n'
+                   '\t/* devfreq_resume_device(gpu->devfreq.devfreq); */\n')
+          patch(p, old_r, new_r)
+          PYEOF
+          grep -n 'BISECT-86' drivers/gpu/drm/msm/msm_gpu_devfreq.c
+          grep -n 'pinned core_clk' drivers/gpu/drm/msm/msm_gpu_devfreq.c
+          grep -n 'devfreq_resume_device' drivers/gpu/drm/msm/msm_gpu_devfreq.c || echo "no-resume-device"
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
