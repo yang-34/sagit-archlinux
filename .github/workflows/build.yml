@@ -569,6 +569,124 @@ jobs:
           PYEOF
           grep -n -B4 'RBBM_SW_RESET_CMD, 1' drivers/gpu/drm/msm/adreno/a5xx_gpu.c | head -14
 
+      - name: b88b capture instrumentation (VMA map/unmap timing + recovery markers)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:60])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          # 1) recovery stage markers: which step precedes a hard reset
+          p = "drivers/gpu/drm/msm/adreno/a5xx_gpu.c"
+          patch(p,
+                "static void a5xx_recover(struct msm_gpu *gpu)\n{\n\tint i;\n\n\tadreno_dump_info(gpu);\n",
+                "static void a5xx_recover(struct msm_gpu *gpu)\n{\n\tint i;\n\n"
+                "\tpr_err(\"A5XX_RECOVER: enter\\n\");\n"
+                "\tadreno_dump_info(gpu);\n"
+                "\tpr_err(\"A5XX_RECOVER: dump done\\n\");\n")
+          patch(p,
+                "\t/* BISECT: halt the micro engine, then power-cycle the GPU */\n"
+                "\tgpu_write(gpu, REG_A5XX_CP_PFP_ME_CNTL, 1);\n"
+                "\tpm_runtime_force_suspend(&gpu->pdev->dev);\n"
+                "\tpm_runtime_force_resume(&gpu->pdev->dev);\n\n"
+                "\tgpu_write(gpu, REG_A5XX_RBBM_SW_RESET_CMD, 1);\n",
+                "\t/* BISECT: halt the micro engine, then power-cycle the GPU */\n"
+                "\tpr_err(\"A5XX_RECOVER: halt CP\\n\");\n"
+                "\tgpu_write(gpu, REG_A5XX_CP_PFP_ME_CNTL, 1);\n"
+                "\tpr_err(\"A5XX_RECOVER: force suspend\\n\");\n"
+                "\tpm_runtime_force_suspend(&gpu->pdev->dev);\n"
+                "\tpr_err(\"A5XX_RECOVER: force suspend done\\n\");\n"
+                "\tpm_runtime_force_resume(&gpu->pdev->dev);\n"
+                "\tpr_err(\"A5XX_RECOVER: force resume done\\n\");\n"
+                "\tpr_err(\"A5XX_RECOVER: sw reset\\n\");\n"
+                "\tgpu_write(gpu, REG_A5XX_RBBM_SW_RESET_CMD, 1);\n")
+          patch(p,
+                "\tadreno_recover(gpu);\n}\n",
+                "\tadreno_recover(gpu);\n\tpr_err(\"A5XX_RECOVER: done\\n\");\n}\n")
+
+          g = "drivers/gpu/drm/msm/msm_gpu.c"
+          patch(g,
+                "\t\tpm_runtime_get_sync(&gpu->pdev->dev);\n\t\tgpu->funcs->recover(gpu);\n\t\tpm_runtime_put_sync(&gpu->pdev->dev);\n",
+                "\t\tpm_runtime_get_sync(&gpu->pdev->dev);\n"
+                "\t\tpr_err(\"RECOVERY: funcs->recover begin (global_faults=%u)\\n\", gpu->global_faults);\n"
+                "\t\tgpu->funcs->recover(gpu);\n"
+                "\t\tpr_err(\"RECOVERY: funcs->recover returned\\n\");\n"
+                "\t\tpm_runtime_put_sync(&gpu->pdev->dev);\n")
+
+          # 2) VMA map/unmap/close timing for both GPU and DPU address spaces
+          v = "drivers/gpu/drm/msm/msm_gem_vma.c"
+          patch(v, '#include "msm_mmu.h"\n',
+                '#include "msm_mmu.h"\n\n'
+                '#include <linux/ktime.h>\n'
+                '#include <linux/moduleparam.h>\n\n'
+                'static bool msm_debug_vma;\n'
+                'module_param(msm_debug_vma, bool, 0644);\n'
+                'MODULE_PARM_DESC(msm_debug_vma,\n'
+                '\t\t"log vma map/unmap/close with timestamps (ring buffer only)");\n')
+
+          patch(v,
+                "\tunsigned size = vma->node.size << PAGE_SHIFT;\n",
+                "\tunsigned size = vma->node.size << PAGE_SHIFT;\n"
+                "\tktime_t t0 = ktime_get();\n")
+          patch(v,
+                "\tif (aspace->mmu)\n"
+                "\t\taspace->mmu->funcs->unmap(aspace->mmu, vma->iova, size);\n"
+                "\n"
+                "\tvma->mapped = false;\n",
+                "\tif (aspace->mmu)\n"
+                "\t\taspace->mmu->funcs->unmap(aspace->mmu, vma->iova, size);\n"
+                "\n"
+                "\tif (msm_debug_vma)\n"
+                "\t\tpr_info(\"VMA unmap %s iova=%09llx size=%u dt=%lldus\\n\",\n"
+                "\t\t\taspace->name ? aspace->name : \"?\",\n"
+                "\t\t\t(unsigned long long)vma->iova, size,\n"
+                "\t\t\tktime_us_delta(ktime_get(), t0));\n"
+                "\n"
+                "\tvma->mapped = false;\n")
+
+          patch(v,
+                "\tunsigned size = npages << PAGE_SHIFT;\n"
+                "\tint ret = 0;\n",
+                "\tunsigned size = npages << PAGE_SHIFT;\n"
+                "\tint ret = 0;\n"
+                "\tktime_t t0 = ktime_get();\n")
+          patch(v,
+                "\tif (ret) {\n"
+                "\t\tvma->mapped = false;\n"
+                "\t\tvma->inuse--;\n"
+                "\t}\n"
+                "\n"
+                "\treturn ret;\n",
+                "\tif (ret) {\n"
+                "\t\tvma->mapped = false;\n"
+                "\t\tvma->inuse--;\n"
+                "\t}\n"
+                "\n"
+                "\tif (msm_debug_vma)\n"
+                "\t\tpr_info(\"VMA map %s iova=%09llx size=%u prot=%03x inuse=%d dt=%lldus\\n\",\n"
+                "\t\t\t(aspace && aspace->name) ? aspace->name : \"?\",\n"
+                "\t\t\t(unsigned long long)vma->iova, size, prot, vma->inuse,\n"
+                "\t\t\tktime_us_delta(ktime_get(), t0));\n"
+                "\n"
+                "\treturn ret;\n")
+
+          patch(v,
+                "\tvma->iova = 0;\n",
+                "\tif (msm_debug_vma)\n"
+                "\t\tpr_info(\"VMA close %s iova=%09llx size=%u\\n\",\n"
+                "\t\t\taspace->name ? aspace->name : \"?\",\n"
+                "\t\t\t(unsigned long long)vma->iova,\n"
+                "\t\t\t(unsigned)(vma->node.size << PAGE_SHIFT));\n"
+                "\n"
+                "\tvma->iova = 0;\n")
+          PYEOF
+          grep -n 'A5XX_RECOVER' drivers/gpu/drm/msm/adreno/a5xx_gpu.c | head
+          grep -n 'RECOVERY: funcs' drivers/gpu/drm/msm/msm_gpu.c
+          grep -n 'VMA map\|VMA unmap\|VMA close\|msm_debug_vma' drivers/gpu/drm/msm/msm_gem_vma.c | head
+
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
           cd kernel
