@@ -687,6 +687,137 @@ jobs:
           grep -n 'RECOVERY: funcs' drivers/gpu/drm/msm/msm_gpu.c
           grep -n 'VMA map\|VMA unmap\|VMA close\|msm_debug_vma' drivers/gpu/drm/msm/msm_gem_vma.c | head
 
+      - name: b88c fence lifecycle instrumentation (guard stomped ops + create/free/release trace)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:60])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          # 1) guard: never dereference a stomped fence->ops (observed 0x8000000080000000)
+          f = "drivers/dma-buf/dma-fence.c"
+          patch(f,
+                "void dma_fence_release(struct kref *kref)\n"
+                "{\n"
+                "\tstruct dma_fence *fence =\n"
+                "\t\tcontainer_of(kref, struct dma_fence, refcount);\n"
+                "\n"
+                "\ttrace_dma_fence_destroy(fence);\n",
+                "void dma_fence_release(struct kref *kref)\n"
+                "{\n"
+                "\tstruct dma_fence *fence =\n"
+                "\t\tcontainer_of(kref, struct dma_fence, refcount);\n"
+                "\n"
+                "\t/*\n"
+                "\t * BISECT-88c: a stomped ops pointer (0x8000000080000000 seen\n"
+                "\t * in the b88b oops) turns this release into a fatal deref for\n"
+                "\t * the calling task (weston/seatd).  Log and leak instead.\n"
+                "\t */\n"
+                "\tif ((unsigned long)fence->ops < 0xffff000000000000ULL) {\n"
+                "\t\tpr_err(\"FENCE_CORRUPT: fence=%px ops=%px ctx=%llu seq=%u flags=0x%lx\\n\",\n"
+                "\t\t       fence, fence->ops,\n"
+                "\t\t       (unsigned long long)fence->context, fence->seqno,\n"
+                "\t\t       fence->flags);\n"
+                "\t\treturn;\n"
+                "\t}\n"
+                "\n"
+                "\ttrace_dma_fence_destroy(fence);\n")
+
+          # 2) sched fence create / release / free trace
+          s = "drivers/gpu/drm/scheduler/sched_fence.c"
+          patch(s,
+                "\tseq = atomic_inc_return(&entity->fence_seq);\n"
+                "\tdma_fence_init(&fence->scheduled, &drm_sched_fence_ops_scheduled,\n"
+                "\t\t       &fence->lock, entity->fence_context, seq);\n"
+                "\tdma_fence_init(&fence->finished, &drm_sched_fence_ops_finished,\n"
+                "\t\t       &fence->lock, entity->fence_context + 1, seq);\n"
+                "\n"
+                "\treturn fence;\n",
+                "\tseq = atomic_inc_return(&entity->fence_seq);\n"
+                "\tdma_fence_init(&fence->scheduled, &drm_sched_fence_ops_scheduled,\n"
+                "\t\t       &fence->lock, entity->fence_context, seq);\n"
+                "\tdma_fence_init(&fence->finished, &drm_sched_fence_ops_finished,\n"
+                "\t\t       &fence->lock, entity->fence_context + 1, seq);\n"
+                "\n"
+                "\tpr_info(\"SFENCE create f=%px ctx=%llu seq=%u owner=%px\\n\",\n"
+                "\t\tfence, (unsigned long long)entity->fence_context, seq, owner);\n"
+                "\n"
+                "\treturn fence;\n")
+
+          patch(s,
+                "static void drm_sched_fence_free(struct rcu_head *rcu)\n"
+                "{\n"
+                "\tstruct dma_fence *f = container_of(rcu, struct dma_fence, rcu);\n"
+                "\tstruct drm_sched_fence *fence = to_drm_sched_fence(f);\n"
+                "\n"
+                "\tkmem_cache_free(sched_fence_slab, fence);\n",
+                "static void drm_sched_fence_free(struct rcu_head *rcu)\n"
+                "{\n"
+                "\tstruct dma_fence *f = container_of(rcu, struct dma_fence, rcu);\n"
+                "\tstruct drm_sched_fence *fence = to_drm_sched_fence(f);\n"
+                "\n"
+                "\tpr_info(\"SFENCE free f=%px ctx=%llu seq=%u\\n\",\n"
+                "\t\tf, (unsigned long long)f->context, f->seqno);\n"
+                "\n"
+                "\tkmem_cache_free(sched_fence_slab, fence);\n")
+
+          patch(s,
+                "static void drm_sched_fence_release_scheduled(struct dma_fence *f)\n"
+                "{\n"
+                "\tstruct drm_sched_fence *fence = to_drm_sched_fence(f);\n"
+                "\n"
+                "\tdma_fence_put(fence->parent);\n",
+                "static void drm_sched_fence_release_scheduled(struct dma_fence *f)\n"
+                "{\n"
+                "\tstruct drm_sched_fence *fence = to_drm_sched_fence(f);\n"
+                "\n"
+                "\tpr_info(\"SFENCE rel_sched f=%px ctx=%llu seq=%u ref=%d parent=%px\\n\",\n"
+                "\t\tf, (unsigned long long)f->context, f->seqno,\n"
+                "\t\tkref_read(&f->refcount), fence ? fence->parent : NULL);\n"
+                "\n"
+                "\tdma_fence_put(fence->parent);\n")
+
+          patch(s,
+                "static void drm_sched_fence_release_finished(struct dma_fence *f)\n"
+                "{\n"
+                "\tstruct drm_sched_fence *fence = to_drm_sched_fence(f);\n"
+                "\n"
+                "\tdma_fence_put(&fence->scheduled);\n",
+                "static void drm_sched_fence_release_finished(struct dma_fence *f)\n"
+                "{\n"
+                "\tstruct drm_sched_fence *fence = to_drm_sched_fence(f);\n"
+                "\n"
+                "\tpr_info(\"SFENCE rel_finished f=%px ctx=%llu seq=%u ref=%d sched_ref=%d\\n\",\n"
+                "\t\tf, (unsigned long long)f->context, f->seqno,\n"
+                "\t\tkref_read(&f->refcount),\n"
+                "\t\tfence ? kref_read(&fence->scheduled.refcount) : -1);\n"
+                "\n"
+                "\tdma_fence_put(&fence->scheduled);\n")
+
+          # 3) gem free context
+          g = "drivers/gpu/drm/msm/msm_gem.c"
+          patch(g,
+                "void msm_gem_free_object(struct drm_gem_object *obj)\n"
+                "{\n"
+                "\tstruct msm_gem_object *msm_obj = to_msm_bo(obj);\n"
+                "\tstruct drm_device *dev = obj->dev;\n"
+                "\tstruct msm_drm_private *priv = dev->dev_private;\n",
+                "void msm_gem_free_object(struct drm_gem_object *obj)\n"
+                "{\n"
+                "\tstruct msm_gem_object *msm_obj = to_msm_bo(obj);\n"
+                "\tstruct drm_device *dev = obj->dev;\n"
+                "\tstruct msm_drm_private *priv = dev->dev_private;\n"
+                "\n"
+                "\tpr_info(\"GEM free %s size=%zu imported=%d\\n\", msm_obj->name,\n"
+                "\t\tobj->size, obj->import_attach ? 1 : 0);\n")
+          PYEOF
+          grep -n 'FENCE_CORRUPT' drivers/dma-buf/dma-fence.c | head -3
+          grep -n 'SFENCE ' drivers/gpu/drm/scheduler/sched_fence.c | head -8
+          grep -n 'GEM free' drivers/gpu/drm/msm/msm_gem.c | head -3
+
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
           cd kernel
