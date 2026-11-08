@@ -568,6 +568,81 @@ jobs:
           grep -n 'module_param_named(fb_probe' drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c
           grep -n 'dpu_probe_fb' drivers/gpu/drm/msm/disp/dpu1/dpu_plane.c | head -8
 
+      - name: Pin GPU to max OPP, no freq ramp (build-85)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:80])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          p = "drivers/gpu/drm/msm/msm_gpu_devfreq.c"
+
+          # 1) helper: highest OPP frequency
+          old_t = ('static int msm_devfreq_target(struct device *dev, unsigned long *freq,\n'
+                   '\t\tu32 flags)\n')
+          new_t = ('/*\n'
+                   ' * BISECT-85: highest OPP of the GPU.  gfx3d_clk_src transitions\n'
+                   ' * flicker the DSI panel on msm8998, so we keep the clock pinned.\n'
+                   ' */\n'
+                   'static unsigned long msm_devfreq_max_freq(struct msm_gpu *gpu)\n'
+                   '{\n'
+                   '\tstruct device *dev = &gpu->pdev->dev;\n'
+                   '\tstruct dev_pm_opp *opp;\n'
+                   '\tunsigned long freq = ~0UL;\n'
+                   '\n'
+                   '\topp = dev_pm_opp_find_freq_floor(dev, &freq);\n'
+                   '\tif (IS_ERR(opp))\n'
+                   '\t\treturn gpu->fast_rate;\n'
+                   '\n'
+                   '\tfreq = dev_pm_opp_get_freq(opp);\n'
+                   '\tdev_pm_opp_put(opp);\n'
+                   '\n'
+                   '\treturn freq;\n'
+                   '}\n'
+                   '\n'
+                   'static int msm_devfreq_target(struct device *dev, unsigned long *freq,\n'
+                   '\t\tu32 flags)\n')
+          patch(p, old_t, new_t)
+
+          # 2) active: pin to max OPP instead of idle_freq * 2
+          old_a = ('\tif (idle_time > msm_devfreq_profile.polling_ms/2) {\n'
+                   '\t\ttarget_freq *= 2;\n'
+                   '\t}\n'
+                   '\n'
+                   '\tdf->idle_freq = 0;\n')
+          new_a = ('\t/*\n'
+                   '\t * BISECT-85: always jump straight to the highest OPP.\n'
+                   '\t * Stock code doubles idle_freq on every activation, which\n'
+                   '\t * makes gfx3d_clk_src change on nearly every submission.\n'
+                   '\t */\n'
+                   '\ttarget_freq = msm_devfreq_max_freq(gpu);\n'
+                   '\t(void)idle_time;\n'
+                   '\n'
+                   '\tdf->idle_freq = 0;\n')
+          patch(p, old_a, new_a)
+
+          # 3) idle: never clamp down
+          old_i = ('\tif (gpu->clamp_to_idle)\n'
+                   '\t\tmsm_devfreq_target(&gpu->pdev->dev, &target_freq, 0);\n')
+          new_i = ('\t/* BISECT-85: keep the clock at max OPP even while idle */\n'
+                   '\tif (0 && gpu->clamp_to_idle)\n'
+                   '\t\tmsm_devfreq_target(&gpu->pdev->dev, &target_freq, 0);\n')
+          patch(p, old_i, new_i)
+
+          # 4) init: start at max OPP, no idle clamp
+          old_n = '\tmsm_devfreq_profile.initial_freq = gpu->fast_rate;\n'
+          new_n = ('\t/* BISECT-85: boot straight into the highest OPP */\n'
+                   '\tgpu->clamp_to_idle = false;\n'
+                   '\tmsm_devfreq_profile.initial_freq = msm_devfreq_max_freq(gpu);\n')
+          patch(p, old_n, new_n)
+          PYEOF
+          grep -n 'msm_devfreq_max_freq' drivers/gpu/drm/msm/msm_gpu_devfreq.c
+          grep -n 'BISECT-85' drivers/gpu/drm/msm/msm_gpu_devfreq.c
+          grep -n 'dev_pm_opp_find_freq_floor' drivers/gpu/drm/msm/msm_gpu_devfreq.c
+
       - name: Patch a5xx per-process address space off (GPU SMMU cannot switch TTBR0)
         run: |
           cd kernel
