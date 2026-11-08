@@ -1259,6 +1259,94 @@ jobs:
           grep -n 'msm_quarantine_skip_dpu' drivers/gpu/drm/msm/msm_gem.c | head -4
           grep -n 'mod_words\|mapcount' drivers/gpu/drm/msm/msm_gem.c | head -6
 
+      - name: b88g kernel-direct poison log (/root/kernel-poison.log)
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new):
+              s = open(path).read()
+              assert s.count(old) == 1, (path, s.count(old), old[:70])
+              open(path, "w").write(s.replace(old, new, 1))
+              print("patched", path)
+
+          g = "drivers/gpu/drm/msm/msm_gem.c"
+          patch(g, '#include <linux/jiffies.h>\n',
+                '#include <linux/jiffies.h>\n'
+                '#include <linux/fs.h>\n')
+
+          # helper: append to /root/kernel-poison.log from workqueue (process context)
+          patch(g,
+                'static bool msm_quarantine_skip_dpu;\n',
+                'static atomic_t msm_klog_n = ATOMIC_INIT(0);\n'
+                '#define MSM_KLOG_MAX 256\n'
+                '\n'
+                'static void msm_kpoison_log(const char *fmt, ...)\n'
+                '{\n'
+                '\tstruct file *f;\n'
+                '\tchar buf[320];\n'
+                '\tva_list ap;\n'
+                '\tint n;\n'
+                '\n'
+                '\tif (atomic_inc_return(&msm_klog_n) > MSM_KLOG_MAX)\n'
+                '\t\treturn;\n'
+                '\n'
+                '\tf = filp_open("/root/kernel-poison.log",\n'
+                '\t\t\t     O_WRONLY | O_CREAT | O_APPEND, 0644);\n'
+                '\tif (IS_ERR(f)) {\n'
+                '\t\tpr_err("KPOISON_OPEN_FAIL %ld\\n", PTR_ERR(f));\n'
+                '\t\treturn;\n'
+                '\t}\n'
+                '\n'
+                '\tva_start(ap, fmt);\n'
+                '\tn = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);\n'
+                '\tva_end(ap);\n'
+                '\tif (n > 0) {\n'
+                '\t\tssize_t w = kernel_write(f, buf, n, &f->f_pos);\n'
+                '\t\tif (w < 0)\n'
+                '\t\t\tpr_err("KPOISON_WRITE_FAIL %zd\\n", w);\n'
+                '\t}\n'
+                '\tvfs_fsync(f, 0);\n'
+                '\tfilp_close(f, NULL);\n'
+                '}\n'
+                '\n'
+                'static bool msm_quarantine_skip_dpu;\n')
+
+          # record skips so a zero-hit run can be distinguished from a skipped run
+          patch(g,
+                '\t\tif (other)\n'
+                '\t\t\treturn false;\n'
+                '\t}\n',
+                '\t\tif (other) {\n'
+                '\t\t\tmsm_kpoison_log("KSKIP_DPU up=%llu name=%s\\n",\n'
+                '\t\t\t\t\t (unsigned long long)div_u64(ktime_get_ns(),\n'
+                '\t\t\t\t\t\t\t\t\t NSEC_PER_SEC),\n'
+                '\t\t\t\t\t msm_obj->name);\n'
+                '\t\t\treturn false;\n'
+                '\t\t}\n'
+                '\t}\n')
+
+          # record successful quarantines
+          patch(g,
+                '\tINIT_DELAYED_WORK(&q->work, msm_qenc_work);\n',
+                '\tmsm_kpoison_log("KTAKE up=%llu name=%s npages=%u flags=%08x gpu=%u dpu=%u\\n",\n'
+                '\t\t\t\t (unsigned long long)div_u64(ktime_get_ns(), NSEC_PER_SEC),\n'
+                '\t\t\t\t q->name, q->npages, q->flags, q->vma_gpu, q->vma_dpu);\n'
+                '\tINIT_DELAYED_WORK(&q->work, msm_qenc_work);\n')
+
+          # mirror every POISON_HIT to the kernel-direct file
+          patch(g,
+                '\t\t\t\t       PageAnon(q->pages[i]) ? 1 : 0);\n',
+                '\t\t\t\t       PageAnon(q->pages[i]) ? 1 : 0);\n'
+                '\t\t\t\tmsm_kpoison_log("KPOISON up=%llu name=%s page=%u off=%u mod_words=%u off0_only=%d mapcount=%d refcount=%d flags=%08x gpu=%u dpu=%u\\n",\n'
+                '\t\t\t\t\t\t (unsigned long long)div_u64(ktime_get_ns(), NSEC_PER_SEC),\n'
+                '\t\t\t\t\t\t q->name, i, first_other, mod_words,\n'
+                '\t\t\t\t\t\t (mod_words == 1 && first_other == 0) ? 1 : 0,\n'
+                '\t\t\t\t\t\t page_mapcount(q->pages[i]),\n'
+                '\t\t\t\t\t\t page_ref_count(q->pages[i]),\n'
+                '\t\t\t\t\t\t q->flags, q->vma_gpu, q->vma_dpu);\n')
+          PYEOF
+          grep -n 'KPOISON\|KTAKE\|KSKIP_DPU\|kernel_write' drivers/gpu/drm/msm/msm_gem.c | head -10
+
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
           cd kernel
