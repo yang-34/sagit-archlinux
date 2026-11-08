@@ -986,6 +986,195 @@ jobs:
           grep -n 'PURGE_FAIL' drivers/gpu/drm/msm/msm_gem_vma.c | head -3
           grep -n 'SMMU_RPM_FAIL\|arm_smmu_rpm_get_checked' drivers/iommu/arm/arm-smmu/arm-smmu.c | head -8
 
+      - name: b88e quarantine poison + swap flood ratelimit + tlb timeout marker
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          def patch(path, old, new, count=1):
+              s = open(path).read()
+              assert s.count(old) == count, (path, s.count(old), old[:60])
+              open(path, "w").write(s.replace(old, new))
+              print("patched", path, "x%d" % count)
+
+          # 1) swapfile: bad-swap flood -> ratelimited (keeps real evidence readable)
+          sw = "mm/swapfile.c"
+          patch(sw,
+                '\tpr_err("%s: %s%08lx\\n", __func__, Bad_file, entry.val);\n',
+                '\tpr_err_ratelimited("%s: %s%08lx\\n", __func__, Bad_file, entry.val);\n',
+                count=2)
+          patch(sw,
+                '\tpr_err("%s: %s%08lx\\n", __func__, Bad_offset, entry.val);\n',
+                '\tpr_err_ratelimited("%s: %s%08lx\\n", __func__, Bad_offset, entry.val);\n')
+          patch(sw,
+                '\tpr_err("%s: %s%08lx\\n", __func__, Unused_file, entry.val);\n',
+                '\tpr_err_ratelimited("%s: %s%08lx\\n", __func__, Unused_file, entry.val);\n')
+          patch(sw,
+                '\tpr_err("%s: %s%08lx\\n", __func__, Unused_offset, entry.val);\n',
+                '\tpr_err_ratelimited("%s: %s%08lx\\n", __func__, Unused_offset, entry.val);\n')
+
+          # 2) arm-smmu: make the existing TLB-sync timeout greppable
+          a = "drivers/iommu/arm/arm-smmu/arm-smmu.c"
+          patch(a,
+                '\tdev_err_ratelimited(smmu->dev,\n'
+                '\t\t\t    "TLB sync timed out -- SMMU may be deadlocked\\n");\n',
+                '\tdev_err_ratelimited(smmu->dev,\n'
+                '\t\t\t    "SMMU_TLBSYNC_TIMEOUT: TLB sync timed out -- SMMU may be deadlocked\\n");\n')
+
+          # 3) msm_gem: quarantine freed BO pages, poison with 0xA5, verify before releasing
+          g = "drivers/gpu/drm/msm/msm_gem.c"
+          patch(g, '#include <linux/pfn_t.h>\n',
+                '#include <linux/pfn_t.h>\n'
+                '#include <linux/moduleparam.h>\n'
+                '#include <linux/mm.h>\n'
+                '#include <linux/jiffies.h>\n')
+
+          patch(g,
+                "static void put_pages(struct drm_gem_object *obj)\n"
+                "{\n"
+                "\tstruct msm_gem_object *msm_obj = to_msm_bo(obj);\n",
+                "/*\n"
+                " * BISECT-88e: quarantine recently freed BO pages and poison them\n"
+                " * with 0xA5.  If anything (GPU via a stale mapping, or a CPU user\n"
+                " * that still holds the buffer) writes into them, the delayed\n"
+                " * verification prints POISON_HIT to the console (ramoops).\n"
+                " * 0 = off.  Limited to <=512KB objects and 32 in flight.\n"
+                " */\n"
+                "static unsigned int msm_quarantine_ms = 2000;\n"
+                "module_param(msm_quarantine_ms, uint, 0644);\n"
+                "MODULE_PARM_DESC(msm_quarantine_ms,\n"
+                "\t\t \"quarantine freed BO pages for N ms and check for writes (0=off)\");\n"
+                "\n"
+                "#define MSM_QENC_MAX 32\n"
+                "#define MSM_QENC_MAX_BYTES (512 * 1024)\n"
+                "\n"
+                "static atomic_t msm_qenc_inflight = ATOMIC_INIT(0);\n"
+                "\n"
+                "struct msm_qenc {\n"
+                "\tstruct delayed_work work;\n"
+                "\tstruct page **pages;\n"
+                "\tunsigned npages;\n"
+                "\tchar name[32];\n"
+                "\tu32 flags;\n"
+                "\tu32 vma_gpu;\n"
+                "\tu32 vma_dpu;\n"
+                "\tu32 vma_mapped;\n"
+                "\tu32 vma_inuse;\n"
+                "};\n"
+                "\n"
+                "static void msm_qenc_work(struct work_struct *work)\n"
+                "{\n"
+                "\tstruct msm_qenc *q = container_of(to_delayed_work(work),\n"
+                "\t\t\t\t\t  struct msm_qenc, work);\n"
+                "\tunsigned i;\n"
+                "\n"
+                "\tfor (i = 0; i < q->npages; i++) {\n"
+                "\t\tu8 *v = page_address(q->pages[i]);\n"
+                "\t\tunsigned j;\n"
+                "\n"
+                "\t\tif (!v)\n"
+                "\t\t\tcontinue;\n"
+                "\t\tfor (j = 0; j + 4 < PAGE_SIZE; j += 4) {\n"
+                "\t\t\tif (*(u32 *)(v + j) != 0xA5A5A5A5u)\n"
+                "\t\t\t\tbreak;\n"
+                "\t\t}\n"
+                "\t\tif (j + 4 < PAGE_SIZE)\n"
+                "\t\t\tpr_err(\"POISON_HIT name=%s page=%u off=%u bytes=%02x%02x%02x%02x flags=%08x gpu_vma=%u dpu_vma=%u mapped=%u inuse=%u\\n\",\n"
+                "\t\t\t       q->name, i, j, v[j], v[j + 1], v[j + 2], v[j + 3],\n"
+                "\t\t\t       q->flags, q->vma_gpu, q->vma_dpu, q->vma_mapped,\n"
+                "\t\t\t       q->vma_inuse);\n"
+                "\t}\n"
+                "\n"
+                "\tfor (i = 0; i < q->npages; i++)\n"
+                "\t\tput_page(q->pages[i]);\n"
+                "\tkvfree(q->pages);\n"
+                "\tatomic_dec(&msm_qenc_inflight);\n"
+                "\tkfree(q);\n"
+                "}\n"
+                "\n"
+                "/* steal pages+sgt of a dying BO; returns true if quarantined */\n"
+                "static bool msm_qenc_take(struct drm_gem_object *obj)\n"
+                "{\n"
+                "\tstruct msm_gem_object *msm_obj = to_msm_bo(obj);\n"
+                "\tstruct msm_gem_vma *vma;\n"
+                "\tstruct msm_qenc *q;\n"
+                "\tunsigned i;\n"
+                "\n"
+                "\tif (!msm_quarantine_ms || !msm_obj->pages || !use_pages(obj))\n"
+                "\t\treturn false;\n"
+                "\tif (obj->size > MSM_QENC_MAX_BYTES)\n"
+                "\t\treturn false;\n"
+                "\tif (atomic_inc_return(&msm_qenc_inflight) > MSM_QENC_MAX) {\n"
+                "\t\tatomic_dec(&msm_qenc_inflight);\n"
+                "\t\treturn false;\n"
+                "\t}\n"
+                "\n"
+                "\tq = kzalloc(sizeof(*q), GFP_KERNEL);\n"
+                "\tif (!q) {\n"
+                "\t\tatomic_dec(&msm_qenc_inflight);\n"
+                "\t\treturn false;\n"
+                "\t}\n"
+                "\n"
+                "\tif (msm_obj->sgt) {\n"
+                "\t\tif (msm_obj->flags & (MSM_BO_WC | MSM_BO_UNCACHED))\n"
+                "\t\t\tsync_for_cpu(msm_obj);\n"
+                "\t\tsg_free_table(msm_obj->sgt);\n"
+                "\t\tkfree(msm_obj->sgt);\n"
+                "\t\tmsm_obj->sgt = NULL;\n"
+                "\t}\n"
+                "\n"
+                "\tq->pages = msm_obj->pages;\n"
+                "\tq->npages = obj->size >> PAGE_SHIFT;\n"
+                "\tmsm_obj->pages = NULL;\n"
+                "\tstrscpy(q->name, msm_obj->name, sizeof(q->name));\n"
+                "\tq->flags = msm_obj->flags;\n"
+                "\tlist_for_each_entry(vma, &msm_obj->vmas, list) {\n"
+                "\t\tif (vma->aspace && vma->aspace->name) {\n"
+                "\t\t\tif (!strcmp(vma->aspace->name, \"gpu\"))\n"
+                "\t\t\t\tq->vma_gpu++;\n"
+                "\t\t\telse\n"
+                "\t\t\t\tq->vma_dpu++;\n"
+                "\t\t}\n"
+                "\t\tif (vma->mapped)\n"
+                "\t\t\tq->vma_mapped++;\n"
+                "\t\tif (vma->inuse)\n"
+                "\t\t\tq->vma_inuse++;\n"
+                "\t}\n"
+                "\n"
+                "\tfor (i = 0; i < q->npages; i++) {\n"
+                "\t\tu8 *v = page_address(q->pages[i]);\n"
+                "\n"
+                "\t\tif (v)\n"
+                "\t\t\tmemset(v, 0xA5, PAGE_SIZE);\n"
+                "\t}\n"
+                "\n"
+                "\tINIT_DELAYED_WORK(&q->work, msm_qenc_work);\n"
+                "\tschedule_delayed_work(&q->work, msecs_to_jiffies(msm_quarantine_ms));\n"
+                "\treturn true;\n"
+                "}\n"
+                "\n"
+                "static void put_pages(struct drm_gem_object *obj)\n"
+                "{\n"
+                "\tstruct msm_gem_object *msm_obj = to_msm_bo(obj);\n")
+
+          patch(g,
+                "\t} else {\n"
+                "\t\tmsm_gem_vunmap(obj);\n"
+                "\t\tput_pages(obj);\n"
+                "\t\tput_iova_vmas(obj);\n"
+                "\t\tmsm_gem_unlock(obj);\n"
+                "\t}\n",
+                "\t} else {\n"
+                "\t\tmsm_gem_vunmap(obj);\n"
+                "\t\tif (!msm_qenc_take(obj))\n"
+                "\t\t\tput_pages(obj);\n"
+                "\t\tput_iova_vmas(obj);\n"
+                "\t\tmsm_gem_unlock(obj);\n"
+                "\t}\n")
+          PYEOF
+          grep -n 'msm_quarantine_ms\|POISON_HIT\|msm_qenc_take' drivers/gpu/drm/msm/msm_gem.c | head -6
+          grep -n 'pr_err_ratelimited' mm/swapfile.c | head -4
+          grep -n 'SMMU_TLBSYNC_TIMEOUT' drivers/iommu/arm/arm-smmu/arm-smmu.c
+
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
           cd kernel
