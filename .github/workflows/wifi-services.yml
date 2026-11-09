@@ -50,6 +50,31 @@ jobs:
           clone tqftpserv "$TQFTPSERV_SHA"
           clone diag      "$DIAG_SHA"
 
+      - name: Patch pd-mapper to log servreg lookups
+        run: |
+          set -eux
+          python3 - <<'PY'
+          import re, sys
+          p = 'pd-mapper/pd-mapper.c'
+          s = open(p).read()
+
+          # Log every SERVREG_LOC_GET_DOMAIN_LIST request: it tells us whether the
+          # modem actually asks pd-mapper for the PD that provides "wlan/fw".
+          ins1 = ("\n\tfprintf(stderr, \"[PD-MAPPER] get_domain_list name='%s'\\n\", req.name);")
+          s, n1 = re.subn(r"req\.name\[sizeof\(req\.name\)-1\] = '\\0';",
+                          lambda m: m.group(0) + ins1, s, count=1)
+
+          ins2 = ("fprintf(stderr, \"[PD-MAPPER] reply %u domain(s)\\n\", resp.domain_list_len);\n\t")
+          s, n2 = re.subn(r"if \(resp\.domain_list_len\)\n\s*resp\.domain_list_valid = 1;",
+                          lambda m: ins2 + m.group(0), s, count=1)
+
+          if n1 != 1 or n2 != 1:
+              sys.exit('patch failed: %d %d' % (n1, n2))
+          open(p, 'w').write(s)
+          print('pd-mapper patched', n1, n2)
+          PY
+          grep -n 'PD-MAPPER] get_domain_list\|PD-MAPPER] reply' pd-mapper/pd-mapper.c
+
       - name: Build and stage aarch64 binaries
         run: |
           set -eux
