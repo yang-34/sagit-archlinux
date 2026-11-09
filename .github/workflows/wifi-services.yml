@@ -50,86 +50,10 @@ jobs:
           clone tqftpserv "$TQFTPSERV_SHA"
           clone diag      "$DIAG_SHA"
 
-      - name: Patch pd-mapper: full servreg instrumentation + PFR reply
+      - name: "Patch pd-mapper - full servreg instrumentation and PFR reply"
         run: |
           set -eux
-          python3 - <<'PY'
-          import re, sys
-          p = 'pd-mapper/pd-mapper.c'
-          s = open(p).read()
-
-          # 1) Log every SERVREG_LOC_GET_DOMAIN_LIST request: it tells us whether the
-          #    modem actually asks pd-mapper for the PD that provides "wlan/fw".
-          ins1 = ("\n\tfprintf(stderr, \"[PD-MAPPER] get_domain_list name='%s'\\n\", req.name);")
-          s, n1 = re.subn(r"req\.name\[sizeof\(req\.name\)-1\] = '\\0';",
-                          lambda m: m.group(0) + ins1, s, count=1)
-
-          ins2 = ("fprintf(stderr, \"[PD-MAPPER] reply %u domain(s)\\n\", resp.domain_list_len);\n\t")
-          s, n2 = re.subn(r"if \(resp\.domain_list_len\)\n\s*resp\.domain_list_valid = 1;",
-                          lambda m: ins2 + m.group(0), s, count=1)
-
-          # 2) Upstream only printf()s "pfr" on stdout, which is block-buffered when
-          #    systemd captures it -> PFR events are invisible and, worse, never get
-          #    a response. Decode it, log it to stderr and answer it, like the
-          #    in-kernel qcom_pd_mapper.c does.
-          pfr_fn = r'''
-static void handle_pfr(int sock, const struct qrtr_packet *pkt)
-{
-	struct servreg_loc_pfr_resp resp = {};
-	struct servreg_loc_pfr_req req = {};
-	DEFINE_QRTR_PACKET(resp_buf, 64);
-	unsigned int txn;
-	ssize_t len;
-	int ret;
-
-	ret = qmi_decode_message(&req, &txn, pkt, QMI_REQUEST,
-				 SERVREG_LOC_PFR, servreg_loc_pfr_req_ei);
-	if (ret < 0) {
-		fprintf(stderr, "[PD-MAPPER] PFR decode failed %d\n", ret);
-		return;
-	}
-	req.service[sizeof(req.service) - 1] = '\0';
-	req.reason[sizeof(req.reason) - 1] = '\0';
-	fprintf(stderr, "[PD-MAPPER] PFR service='%s' reason='%s'\n",
-		req.service, req.reason);
-
-	resp.result.result = QMI_RESULT_SUCCESS;
-	resp.result.error = QMI_ERR_NONE;
-	len = qmi_encode_message(&resp_buf, QMI_RESPONSE, SERVREG_LOC_PFR,
-				 txn, &resp, servreg_loc_pfr_resp_ei);
-	if (len < 0) {
-		fprintf(stderr, "[PD-MAPPER] PFR encode failed %d\n", (int)len);
-		return;
-	}
-
-	ret = qrtr_sendto(sock, pkt->node, pkt->port,
-			  resp_buf.data, resp_buf.data_len);
-	if (ret < 0)
-		fprintf(stderr, "[PD-MAPPER] PFR send failed %d\n", ret);
-}
-
-'''
-          s, n3 = re.subn(r"static void handle_get_domain_list\(",
-                          lambda m: pfr_fn.lstrip('\n') + m.group(0), s, count=1)
-
-          # 3) Log every decoded QMI message id so unknown requests are visible.
-          ins3 = ("fprintf(stderr, \"[PD-MAPPER] qmi msg_id=0x%02x\\n\", msg_id);\n\n\t\t\t")
-          s, n4 = re.subn(r"switch \(msg_id\) \{",
-                          lambda m: ins3 + m.group(0), s, count=1)
-
-          # 4) Route PFR to the new handler instead of the silent printf().
-          s, n5 = re.subn(r'case SERVREG_LOC_PFR:\n(\s*)printf\("\[PD-MAPPER\] pfr\\n"\);',
-                          'case SERVREG_LOC_PFR:\n\\1handle_pfr(fd, &pkt);', s, count=1)
-
-          # 5) Unbuffered stdout: keep journald-visible ordering with stderr.
-          s, n6 = re.subn(r"(\n\tret = pd_load_maps\(\);)",
-                          "\n\tsetvbuf(stdout, NULL, _IONBF, 0);\\1", s, count=1)
-
-          if (n1, n2, n3, n4, n5, n6) != (1, 1, 1, 1, 1, 1):
-              sys.exit('patch failed: %r' % ((n1, n2, n3, n4, n5, n6),))
-          open(p, 'w').write(s)
-          print('pd-mapper patched', (n1, n2, n3, n4, n5, n6))
-          PY
+          python3 ci/patch_pd_mapper.py pd-mapper/pd-mapper.c
           grep -n 'PD-MAPPER] get_domain_list\|PD-MAPPER] reply\|PD-MAPPER] qmi msg_id\|handle_pfr\|setvbuf' pd-mapper/pd-mapper.c
 
       - name: Build and stage aarch64 binaries
