@@ -57,9 +57,12 @@ jobs:
           #    then install a second copy into the staging tree for the artifact.
           meson setup qrtr/b qrtr --prefix=/usr
           meson compile -C qrtr/b
+          # Staging install MUST come first: a root install beforehand makes
+          # meson-logs/install-log.txt root-owned and the unprivileged DESTDIR
+          # install then fails with PermissionError (run 42580711856).
+          DESTDIR="$ST" meson install -C qrtr/b
           sudo meson install -C qrtr/b
           sudo ldconfig
-          DESTDIR="$ST" meson install -C qrtr/b
           pkg-config --modversion qrtr
           pkg-config --cflags --libs qrtr
 
