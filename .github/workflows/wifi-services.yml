@@ -1,0 +1,116 @@
+name: wifi-services
+
+# Cross-compile the aarch64 userspace QMI services the mi6 needs for Wi-Fi.
+# The device rootfs has no gcc/make/meson/pkg-config, so this is built off-device.
+# NOTE: no qrtr-ns here -- the QRTR name service has been in the kernel since
+# Linux 5.7 (device has ns.ko loaded), and linux-msm/qrtr dropped the daemon.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: wifi-services-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QRTR_SHA: 29e36ae164389580a0f8ea7a7fdb728140ae978d
+  RMTFS_SHA: b30a3eb38f9af283f18dbd3c7755653efc52c094
+  PDMAPPER_SHA: 5ecd2fe926aca7abfe40724177f63b942cff3947
+  TQFTPSERV_SHA: eb4b9a04ff92d2753ededf32cc3b6ed287f6e29b
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential meson ninja-build pkg-config git file \
+            libudev-dev liblzma-dev libzstd-dev
+          uname -m
+          gcc --version | head -1
+          meson --version
+
+      - name: Clone and pin service sources
+        run: |
+          set -e
+          clone() {
+            git clone "https://github.com/linux-msm/$1.git" "$1"
+            git -C "$1" checkout "$2"
+            echo "$1 $(git -C "$1" rev-parse HEAD)"
+          }
+          clone qrtr      "$QRTR_SHA"
+          clone rmtfs     "$RMTFS_SHA"
+          clone pd-mapper "$PDMAPPER_SHA"
+          clone tqftpserv "$TQFTPSERV_SHA"
+
+      - name: Build and stage aarch64 binaries
+        run: |
+          set -eux
+          ST="$PWD/stage"
+          mkdir -p "$ST"
+
+          # 1) qrtr (meson): libqrtr + qrtr.pc + qrtr-cfg/qrtr-lookup.
+          #    Install system-wide first so downstream -lqrtr / pkg-config work,
+          #    then install a second copy into the staging tree for the artifact.
+          meson setup qrtr/b qrtr --prefix=/usr
+          meson compile -C qrtr/b
+          sudo meson install -C qrtr/b
+          sudo ldconfig
+          DESTDIR="$ST" meson install -C qrtr/b
+          pkg-config --modversion qrtr
+          pkg-config --cflags --libs qrtr
+
+          # 2) rmtfs (Makefile): -lqrtr -ludev -lpthread
+          make -C rmtfs prefix=/usr
+          make -C rmtfs prefix=/usr DESTDIR="$ST" install
+
+          # 3) pd-mapper (Makefile): -lqrtr -llzma
+          make -C pd-mapper prefix=/usr
+          make -C pd-mapper prefix=/usr DESTDIR="$ST" install
+
+          # 4) tqftpserv (meson): serves wlanmdsp.mbn to the modem over QRTR
+          meson setup tqftpserv/b tqftpserv --prefix=/usr
+          meson compile -C tqftpserv/b
+          DESTDIR="$ST" meson install -C tqftpserv/b
+
+          find "$ST" -type f | sort | head -60
+
+      - name: Assemble deployable artifact
+        run: |
+          set -eux
+          ST="$PWD/stage"
+          OUT="$PWD/out"
+          mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/units"
+          for b in qrtr-cfg qrtr-lookup rmtfs pd-mapper tqftpserv; do
+            f=$(find "$ST" -type f -name "$b" -perm -u+x | head -1)
+            if [ -z "$f" ]; then echo "MISSING BINARY: $b"; exit 1; fi
+            cp -a "$f" "$OUT/bin/$b"
+          done
+          find "$ST" \( -name 'libqrtr.so' -o -name 'libqrtr.so.*' \) \
+            -exec cp -a {} "$OUT/lib/" \;
+          find "$ST" -name '*.service' -exec cp -a {} "$OUT/units/" \; || true
+          {
+            echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "arch: $(uname -m)"
+            echo "qrtr:      $QRTR_SHA"
+            echo "rmtfs:     $RMTFS_SHA"
+            echo "pd-mapper: $PDMAPPER_SHA"
+            echo "tqftpserv: $TQFTPSERV_SHA"
+          } > "$OUT/BUILDINFO.txt"
+          file "$OUT"/bin/*
+          ls -lhR "$OUT"
+
+      - name: Package and checksum
+        run: |
+          tar -czf wifi-services.tar.gz -C out .
+          sha256sum wifi-services.tar.gz
+          ls -lh wifi-services.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wifi-services
+          path: wifi-services.tar.gz
+          retention-days: 30
