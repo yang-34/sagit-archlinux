@@ -17,6 +17,9 @@ env:
   RMTFS_SHA: b30a3eb38f9af283f18dbd3c7755653efc52c094
   PDMAPPER_SHA: 5ecd2fe926aca7abfe40724177f63b942cff3947
   TQFTPSERV_SHA: eb4b9a04ff92d2753ededf32cc3b6ed287f6e29b
+  # diag-router: required by degdag's verified mi6 Wi-Fi recipe, must start
+  # BEFORE rmtfs/pd-mapper/tqftpserv.
+  DIAG_SHA: 23c12c167e93215853af4e59c021551767f6fec8
 
 jobs:
   build:
@@ -45,6 +48,7 @@ jobs:
           clone rmtfs     "$RMTFS_SHA"
           clone pd-mapper "$PDMAPPER_SHA"
           clone tqftpserv "$TQFTPSERV_SHA"
+          clone diag      "$DIAG_SHA"
 
       - name: Build and stage aarch64 binaries
         run: |
@@ -79,6 +83,11 @@ jobs:
           meson compile -C tqftpserv/b
           DESTDIR="$ST" meson install -C tqftpserv/b
 
+          # 5) diag (Makefile): diag-router routes DIAG messages to the modem;
+          #    degdag's mi6 recipe starts it before the three QMI services.
+          make -C diag prefix=/usr
+          make -C diag prefix=/usr DESTDIR="$ST" install
+
           find "$ST" -type f | sort | head -60
 
       - name: Assemble deployable artifact
@@ -87,7 +96,7 @@ jobs:
           ST="$PWD/stage"
           OUT="$PWD/out"
           mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/units"
-          for b in qrtr-cfg qrtr-lookup rmtfs pd-mapper tqftpserv; do
+          for b in qrtr-cfg qrtr-lookup rmtfs pd-mapper tqftpserv diag-router send_data; do
             f=$(find "$ST" -type f -name "$b" -perm -u+x | head -1)
             if [ -z "$f" ]; then echo "MISSING BINARY: $b"; exit 1; fi
             cp -a "$f" "$OUT/bin/$b"
@@ -102,6 +111,7 @@ jobs:
             echo "rmtfs:     $RMTFS_SHA"
             echo "pd-mapper: $PDMAPPER_SHA"
             echo "tqftpserv: $TQFTPSERV_SHA"
+            echo "diag:      $DIAG_SHA"
           } > "$OUT/BUILDINFO.txt"
           file "$OUT"/bin/*
           ls -lhR "$OUT"
