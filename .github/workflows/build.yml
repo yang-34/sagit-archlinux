@@ -1549,6 +1549,7 @@ jobs:
             -e SCSI_UFS_QCOM -e SCSI_UFSHCD -e SCSI_UFSHCD_PLTFRM \
             -e EFI_PARTITION -e EXT4_FS \
             -e SERIAL_QCOM_GENI -e SERIAL_QCOM_GENI_CONSOLE -e QCOM_GENI_SE \
+            -m SERIAL_MSM \
             -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS \
             -e I2C_QUP -e RTC_DRV_PM8XXX -e RTC_HCTOSYS -e BATTERY_QCOM_FG \
             -m SND_SOC_TFA989X \
