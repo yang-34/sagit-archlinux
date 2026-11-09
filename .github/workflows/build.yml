@@ -1470,6 +1470,36 @@ jobs:
           grep -n 'msm_qenc_rearm\|QENC_REARM\|QENC_RELEASE\|MSM_QENC_MAX' drivers/gpu/drm/msm/msm_gem.c | head -10
           grep -n 'msm_smmu_flush_all\|iommu_flush_iotlb_all' drivers/gpu/drm/msm/msm_iommu.c | head -6
 
+      - name: b88i poison log safe in process-exit context
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          g = "drivers/gpu/drm/msm/msm_gem.c"
+          s = open(g).read()
+          start = s.index("static void msm_kpoison_log(const char *fmt, ...)\n{")
+          end = s.index("\n}\n", start) + 3
+          new = '''static void msm_kpoison_log(const char *fmt, ...)
+          {
+              va_list ap;
+              char buf[320];
+              int n;
+
+              if (atomic_inc_return(&msm_klog_n) > MSM_KLOG_MAX)
+                  return;
+
+              va_start(ap, fmt);
+              n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+              va_end(ap);
+              if (n > 0)
+                  pr_info("KPOISON %s", buf);
+          }
+          '''
+          s = s[:start] + new + s[end:]
+          open(g, "w").write(s)
+          print("b88i: msm_kpoison_log is now printk-only (no filp_open on BO free)")
+          PYEOF
+          grep -n 'msm_kpoison_log\|filp_open\|kernel_write' drivers/gpu/drm/msm/msm_gem.c | head -8
+
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
           cd kernel
