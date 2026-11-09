@@ -26,6 +26,9 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
+      # The repo itself is tiny (400 KB); we need ci/patch_pd_mapper.py.
+      - uses: actions/checkout@v4
+
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
