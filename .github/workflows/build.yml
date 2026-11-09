@@ -1347,6 +1347,129 @@ jobs:
           PYEOF
           grep -n 'KPOISON\|KTAKE\|KSKIP_DPU\|kernel_write' drivers/gpu/drm/msm/msm_gem.c | head -10
 
+      - name: b88h adaptive deferred BO free + optional SMMU context flush
+        run: |
+          cd kernel
+          python3 - <<'PYEOF'
+          g = "drivers/gpu/drm/msm/msm_gem.c"
+          s = open(g).read()
+
+          PARAMS = r'''/* BISECT-88h: validated fix for GL-on-DSI memory corruption.
+           * Cell C proved that keeping freed BO pages away from the buddy
+           * allocator makes GL stable; cell A proved a device writes those
+           * pages after unmap.  Adaptive deferred free keeps them only while
+           * writes are observed. */
+          static bool msm_qenc_rearm = true;
+          module_param(msm_qenc_rearm, bool, 0644);
+          MODULE_PARM_DESC(msm_qenc_rearm,
+                           "hold freed BO pages while a device still writes them");
+
+          static unsigned int msm_qenc_rearm_max;
+          module_param(msm_qenc_rearm_max, uint, 0644);
+          MODULE_PARM_DESC(msm_qenc_rearm_max,
+                           "max re-arm rounds before forced release (0 = unlimited)");
+
+          '''
+
+          NEW_WORKER = r'''static void msm_qenc_work(struct work_struct *work)
+          {
+              struct msm_qenc *q = container_of(to_delayed_work(work),
+                                                struct msm_qenc, work);
+              unsigned i, hit_pages = 0;
+
+              for (i = 0; i < q->npages; i++) {
+                  u8 *v = page_address(q->pages[i]);
+                  unsigned j, mod_words = 0;
+
+                  if (!v)
+                      continue;
+                  for (j = 0; j + 4 < PAGE_SIZE; j += 4)
+                      if (*(u32 *)(v + j) != 0xA5A5A5A5u)
+                          mod_words++;
+                  if (mod_words) {
+                      hit_pages++;
+                      if (!msm_qenc_rearm)
+                          pr_err("POISON_HIT name=%s page=%u mod_words=%u "
+                                 "flags=%08x gpu=%u dpu=%u mapcount=%d "
+                                 "refcount=%d mapping=%px anon=%d\n",
+                                 q->name, i, mod_words, q->flags,
+                                 q->vma_gpu, q->vma_dpu,
+                                 page_mapcount(q->pages[i]),
+                                 page_ref_count(q->pages[i]),
+                                 page_mapping(q->pages[i]),
+                                 PageAnon(q->pages[i]) ? 1 : 0);
+                  }
+                  if (msm_qenc_rearm)
+                      memset(v, 0xA5, PAGE_SIZE);
+              }
+
+              if (msm_qenc_rearm && hit_pages &&
+                  (!msm_qenc_rearm_max ||
+                   q->rearm_count < msm_qenc_rearm_max)) {
+                  q->rearm_count++;
+                  if (q->rearm_count <= 3 || !(q->rearm_count % 30))
+                      pr_info("QENC_REARM name=%s npages=%u hits=%u round=%u\n",
+                              q->name, q->npages, hit_pages, q->rearm_count);
+                  schedule_delayed_work(&q->work,
+                                        msecs_to_jiffies(msm_quarantine_ms));
+                  return;
+              }
+
+              pr_info("QENC_RELEASE name=%s npages=%u rounds=%u hits=%u\n",
+                      q->name, q->npages, q->rearm_count, hit_pages);
+              for (i = 0; i < q->npages; i++)
+                  put_page(q->pages[i]);
+              kvfree(q->pages);
+              atomic_dec(&msm_qenc_inflight);
+              kfree(q);
+          }
+          '''
+
+          marker = "static bool msm_quarantine_skip_dpu;\n"
+          assert s.count(marker) == 1, ("marker", s.count(marker))
+          s = s.replace(marker, PARAMS + marker, 1)
+
+          assert s.count("#define MSM_QENC_MAX 32\n") == 1
+          s = s.replace("#define MSM_QENC_MAX 32\n",
+                        "#define MSM_QENC_MAX 256\n", 1)
+
+          obj = "struct msm_qenc {\n\tstruct delayed_work work;\n"
+          assert s.count(obj) == 1, ("struct", s.count(obj))
+          s = s.replace(obj, obj + "\tunsigned rearm_count;\n", 1)
+
+          a = s.index("static void msm_qenc_work(struct work_struct *work)\n{")
+          b = s.index("\nstatic bool msm_qenc_take(", a)
+          s = s[:a] + NEW_WORKER + s[b:]
+          open(g, "w").write(s)
+          print("b88h msm_gem.c adaptive deferred free installed")
+
+          p = "drivers/gpu/drm/msm/msm_iommu.c"
+          t = open(p).read()
+          m2 = "static bool msm_debug_unmap;\n"
+          assert t.count(m2) == 1, ("unmap marker", t.count(m2))
+          t = t.replace(m2,
+                        "static bool msm_smmu_flush_all;\n"
+                        "module_param(msm_smmu_flush_all, bool, 0644);\n"
+                        "MODULE_PARM_DESC(msm_smmu_flush_all,\n"
+                        "\t\t \"flush the whole SMMU context after every iommu_unmap\");\n"
+                        "\n" + m2, 1)
+          u = ("\tret = iommu_unmap(iommu->domain, iova, len);\n"
+               "\n"
+               "\tif (ret != len) {\n")
+          assert t.count(u) == 1, ("unmap site", t.count(u))
+          t = t.replace(u,
+                        "\tret = iommu_unmap(iommu->domain, iova, len);\n"
+                        "\n"
+                        "\tif (msm_smmu_flush_all)\n"
+                        "\t\tiommu_flush_iotlb_all(iommu->domain);\n"
+                        "\n"
+                        "\tif (ret != len) {\n", 1)
+          open(p, "w").write(t)
+          print("b88h msm_iommu.c optional full TLB flush installed")
+          PYEOF
+          grep -n 'msm_qenc_rearm\|QENC_REARM\|QENC_RELEASE\|MSM_QENC_MAX' drivers/gpu/drm/msm/msm_gem.c | head -10
+          grep -n 'msm_smmu_flush_all\|iommu_flush_iotlb_all' drivers/gpu/drm/msm/msm_iommu.c | head -6
+
       - name: Patch arm-smmu runtime resume (GPU GX settle delay)
         run: |
           cd kernel
