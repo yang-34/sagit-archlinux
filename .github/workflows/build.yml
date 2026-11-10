@@ -53,6 +53,13 @@ jobs:
           cd kernel
           python3 "$GITHUB_WORKSPACE/scripts/patch_glink_diag.py" .
           grep -n 'GLINKDIAG' drivers/rpmsg/qcom_glink_native.c
+          
+      - name: GLINK intentless for modem only + APCS readback (build-b89b)
+        run: |
+          cd kernel
+          python3 "$GITHUB_WORKSPACE/scripts/patch_glink_intentless.py" .
+          grep -n 'remote_pid == 1' drivers/rpmsg/qcom_glink_smem.c
+          grep -n 'APCSDIAG' drivers/mailbox/qcom-apcs-ipc-mailbox.c
 
       - name: Patch TFA9890 revision (Mi6 amp reports 0x88)
         run: |
