@@ -16,7 +16,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 200
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -59,27 +59,37 @@ jobs:
           set -eux
           cd kernel
           make ARCH=$ARCH CROSS_COMPILE=$CROSS msm8998_defconfig
-          scripts/config --file .config -e DEVTMPFS -e DEVTMPFS_MOUNT -e DRM -e DRM_MSM -e DRM_FBDEV_EMULATION -e FB -e FRAMEBUFFER_CONSOLE -e VT -e VT_CONSOLE -e SCSI_UFS_QCOM -e SCSI_UFSHCD -e SCSI_UFSHCD_PLTFRM -e EXT4_FS -e EFI_PARTITION -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS -e USB_F_ECM -e USB_CONFIGFS_RNDIS -e USB_CONFIGFS_ECM -e CONFIGFS_FS -e USB_DWC3 -e USB_DWC3_DUAL_ROLE -e USB_QCOM_DWC3 -e PHY_QCOM_QUSB2 -e PHY_QCOM_QMP -e QCOM_Q6V5_PAS -e QCOM_Q6V5_MSS -e QCOM_SMEM -e QCOM_SMD -e QCOM_SMD_RPM -e RPMSG_QCOM_GLINK -e RPMSG_QCOM_GLINK_SMEM -e QRTR -e QRTR_SMD -e QCOM_APCS_IPC -e MAILBOX -e QCOM_SMP2P -e QCOM_SMSM -e QCOM_SMEM_STATE
+          scripts/config --file .config -e DEVTMPFS -e DEVTMPFS_MOUNT -e DRM -e DRM_MSM -e DRM_FBDEV_EMULATION -e FB -e FRAMEBUFFER_CONSOLE -e VT -e VT_CONSOLE -e SCSI_UFS_QCOM -e SCSI_UFSHCD -e SCSI_UFSHCD_PLTFRM -e EXT4_FS -e EFI_PARTITION -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS -e USB_F_ECM -e USB_CONFIGFS_RNDIS -e USB_CONFIGFS_ECM -e CONFIGFS_FS -e USB_DWC3 -e USB_DWC3_DUAL_ROLE -e USB_QCOM_DWC3 -e PHY_QCOM_QUSB2 -e PHY_QCOM_QMP -e QCOM_RPROC_COMMON -e QCOM_Q6V5_COMMON -e QCOM_Q6V5_PAS -e QCOM_Q6V5_MSS -e QCOM_SYSMON -e QCOM_SMEM -e QCOM_SMEM_STATE -e QCOM_SMD -e QCOM_SMD_RPM -e RPMSG_QCOM_GLINK -e RPMSG_QCOM_GLINK_SMEM -e QRTR -e QRTR_SMD -e QCOM_APCS_IPC -e MAILBOX -e QCOM_SMP2P -e QCOM_SMSM
           make ARCH=$ARCH CROSS_COMPILE=$CROSS olddefconfig
           echo "=== key symbols ==="
-          for s in CONFIG_DRM_MSM CONFIG_FRAMEBUFFER_CONSOLE CONFIG_SCSI_UFS_QCOM CONFIG_EXT4_FS CONFIG_USB_GADGET CONFIG_USB_CONFIGFS CONFIG_USB_F_RNDIS CONFIG_CONFIGFS_FS CONFIG_USB_DWC3 CONFIG_PHY_QCOM_QUSB2 CONFIG_QCOM_Q6V5_PAS CONFIG_QCOM_Q6V5_MSS CONFIG_QCOM_SMEM CONFIG_QRTR CONFIG_QRTR_SMD CONFIG_RPMSG_QCOM_GLINK CONFIG_QCOM_APCS_IPC CONFIG_QCOM_SMP2P CONFIG_QCOM_SMD_RPM; do echo "$s $(grep -E "^$s=" .config || echo MISSING)"; done
+          for s in CONFIG_QCOM_RPROC_COMMON CONFIG_QCOM_Q6V5_COMMON CONFIG_QCOM_Q6V5_PAS CONFIG_QCOM_Q6V5_MSS CONFIG_QCOM_SYSMON CONFIG_QCOM_SMEM CONFIG_QRTR CONFIG_QRTR_SMD CONFIG_RPMSG_QCOM_GLINK CONFIG_QCOM_APCS_IPC CONFIG_QCOM_SMP2P CONFIG_QCOM_SMD_RPM CONFIG_DRM_MSM CONFIG_SCSI_UFS_QCOM CONFIG_EXT4_FS CONFIG_USB_GADGET CONFIG_USB_CONFIGFS CONFIG_USB_F_RNDIS CONFIG_CONFIGFS_FS; do
+            echo "$s $(grep -E "^$s=" .config || echo MISSING)"
+          done
+          if ! grep -q "^CONFIG_QCOM_Q6V5_PAS=y" .config; then
+            echo "FATAL: QCOM_Q6V5_PAS did not end up built-in"
+            grep -E "CONFIG_QCOM_(Q6V5|RPROC)" .config || true
+            exit 1
+          fi
 
-      - name: Build kernel
+      - name: Build kernel and modules
         run: |
           set -eux
           cd kernel
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS -j"$(nproc)" Image.gz dtbs
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS -j"$(nproc)" Image.gz dtbs modules
           ls -l arch/arm64/boot/Image.gz
           ls -l arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dtb
 
-      - name: Assemble Image.gz-dtb
+      - name: Assemble Image.gz-dtb and modules
         run: |
           set -eux
           cd kernel
           cat arch/arm64/boot/Image.gz arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dtb > Image.gz-dtb
-          ls -lh Image.gz-dtb
-          tar -czf /tmp/modules.tar.gz -T /dev/null
-          ls -lh /tmp/modules.tar.gz
+          make -s ARCH=$ARCH CROSS_COMPILE=$CROSS kernelrelease > /tmp/krel.txt
+          cat /tmp/krel.txt
+          rm -rf modroot
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS INSTALL_MOD_PATH="$PWD/modroot" INSTALL_MOD_STRIP=1 modules_install
+          tar -czf /tmp/modules.tar.gz -C modroot lib/modules
+          ls -lh Image.gz-dtb /tmp/modules.tar.gz
 
       - name: Build initramfs
         run: |
