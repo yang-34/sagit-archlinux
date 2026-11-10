@@ -25,8 +25,9 @@ if src.count(old_probe) != 1:
     raise SystemExit('probe anchor count=%d' % src.count(old_probe))
 src = src.replace(old_probe, new_probe)
 
-# The same two lines appear twice (qcom_glink_tx and the READ_NOTIF path);
-# only instrument the tx path, i.e. the first occurrence.
+# The same pair of calls also appears in the READ_NOTIF branch, but there it is
+# indented by three tabs (inside a switch case). The tx path uses a single tab,
+# so this exact string occurs once - and that is the one we want.
 old_tx = (
     "\tmbox_send_message(glink->mbox_chan, NULL);\n"
     "\tmbox_client_txdone(glink->mbox_chan, 0);\n"
@@ -39,7 +40,7 @@ new_tx = (
     "\t}\n"
     "\tmbox_client_txdone(glink->mbox_chan, 0);\n"
 )
-if src.count(old_tx) != 2:
+if src.count(old_tx) != 1:
     raise SystemExit('tx anchor count=%d' % src.count(old_tx))
 src = src.replace(old_tx, new_tx, 1)
 
