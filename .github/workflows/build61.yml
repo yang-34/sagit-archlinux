@@ -47,12 +47,13 @@ jobs:
           ls arch/arm64/boot/dts/qcom/ | grep -i sagit
           ls arch/arm64/configs/
 
-      - name: GLINK diag patch (6.1)
+      - name: GLINK + QRTR flow patches (6.1)
         run: |
           set -eux
           cd kernel
           python3 "$GITHUB_WORKSPACE/scripts/patch_glink_diag61.py" .
           grep -n 'GLINKDIAG61' drivers/rpmsg/qcom_glink_native.c
+          grep -n 'QRTRFLOW' net/qrtr/af_qrtr.c
 
       - name: Configure 6.1 kernel
         run: |

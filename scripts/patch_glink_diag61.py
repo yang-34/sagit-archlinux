@@ -140,3 +140,35 @@ src = src.replace('@NL@', chr(92) + 'n')
 
 open(NATIVE, 'w', encoding='utf-8', newline='\n').write(src)
 print('patched:', NATIVE)
+
+# ---- 7. QRTR: disable TX flow control --------------------------------------
+# The 2018 modem firmware never sends QRTR_TYPE_RESUME_TX, so the stock
+# high-watermark (QRTR_TX_FLOW_HIGH = 10) stalls every (node,port) flow after
+# a handful of packets - the sender then sleeps forever in qrtr_tx_wait(),
+# which is exactly the "AP->modem dies after the first few packets" symptom
+# (glink tx fifo is empty the whole time).  The glink fifo already provides
+# back-pressure, so skip the credit wait.
+QRTR = os.path.join(ROOT, 'net/qrtr/af_qrtr.c')
+q = open(QRTR, encoding='utf-8').read()
+
+anchor = (
+    '\t/* Never set confirm_rx on non-data packets */\n'
+    '\tif (type != QRTR_TYPE_DATA)\n'
+    '\t\treturn 0;\n'
+)
+inject = (
+    '\t/* Never set confirm_rx on non-data packets */\n'
+    '\tif (type != QRTR_TYPE_DATA)\n'
+    '\t\treturn 0;\n'
+    '\n'
+    '\t/* QRTRFLOW: peer never sends RESUME_TX, do not wait for credit */\n'
+    '\tpr_info_ratelimited("QRTRFLOW skip dest=%d:%d type=%d@NL@",\n'
+    '\t\t\t    dest_node, dest_port, type);\n'
+    '\treturn 0;\n'
+)
+if q.count(anchor) != 1:
+    raise SystemExit('qrtr anchor count=%d' % q.count(anchor))
+q = q.replace(anchor, inject)
+q = q.replace('@NL@', chr(92) + 'n')
+open(QRTR, 'w', encoding='utf-8', newline='\n').write(q)
+print('patched:', QRTR)
