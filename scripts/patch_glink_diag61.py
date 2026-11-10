@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Instrument glink for the 6.1 msm8998-mainline tree (build-b61f).
+"""Instrument glink for the 6.1 msm8998-mainline tree (build-b61g).
 
-Five signals, all tagged GLINKDIAG61:
+Adds, on top of the b61f signals:
 
-  probe      - mbox channel + fifo lengths + negotiated feature set
-  ver-req    - remote sent VERSION (modem is talking to us)
-  ver-ack    - remote ACKed our VERSION  <- the decisive one: if this never
-               prints, the modem never completed the glink handshake and every
-               later tx is one-way by definition
-  tx         - mbox_send_message() return for each packet
-  fifo-full  - tx fifo exhausted, READ_NOTIF nudge fired
+  /sys/kernel/debug/<glink-dev>/nudge
+        write anything -> issue one extra mbox_send_message(NULL) on the very
+        channel the driver holds, and log the return plus current tx avail.
+        This is the decisive experiment: if a manual mailbox kick makes the
+        modem answer a QMI request that it otherwise ignores, the problem is
+        interrupt delivery, not the modem's rx path.
 
-Note: the C newline escape is written as the placeholder @NL@ and substituted
-with chr(92)+'n' at the end, so this file stays escape-safe no matter how it
-is transported.
+  fifo-full is now logged on *every* pass through the wait loop (ratelimited),
+  not only the first one, so "modem stopped reading" is visible even after the
+  READ_NOTIF flag was already set.
+
+C newline escapes use the @NL@ placeholder, substituted with chr(92)+'n'.
 """
 import os
 import re
@@ -33,7 +34,15 @@ def sub_once(pattern, repl, label):
     src = new
 
 
-# ---- 1. probe: channel, fifo sizes, features -------------------------------
+# ---- 0. headers -------------------------------------------------------------
+sub_once(
+    r'#include <linux/mailbox_client\.h>\n',
+    '#include <linux/mailbox_client.h>\n'
+    '#include <linux/debugfs.h>\n'
+    '#include <linux/fs.h>\n',
+    'headers')
+
+# ---- 1. probe: channel, fifo sizes, features, debugfs nudge file ------------
 sub_once(
     r'\t\treturn ERR_CAST\(glink->mbox_chan\);\n\t\}\n\n\tirq = of_irq_get',
     '\t\treturn ERR_CAST(glink->mbox_chan);\n'
@@ -42,6 +51,12 @@ sub_once(
     '\tpr_info("GLINKDIAG61 probe chan=%px txlen=%zu rxlen=%zu feat=0x%x@NL@",\n'
     '\t\tglink->mbox_chan, glink->tx_pipe->length, glink->rx_pipe->length,\n'
     '\t\tglink->features);\n'
+    '\n'
+    '\t{\n'
+    '\t\tstruct dentry *__d = debugfs_create_dir(dev_name(dev), NULL);\n'
+    '\t\tdebugfs_create_file("nudge", 0200, __d, glink,\n'
+    '\t\t\t\t    &qcom_glink_nudge_fops);\n'
+    '\t}\n'
     '\n'
     '\tirq = of_irq_get',
     'probe')
@@ -78,16 +93,48 @@ sub_once(
     '\tmbox_client_txdone(glink->mbox_chan, 0);\n',
     'tx')
 
-# ---- 5. tx fifo exhausted -> READ_NOTIF ------------------------------------
+# ---- 5. fifo pressure: log every wait, then the READ_NOTIF nudge ------------
 sub_once(
-    r'(\t\tif \(!glink->sent_read_notify\) \{\n'
-    r'\t\t\tglink->sent_read_notify = true;\n)'
+    r'(\t\tif \(!glink->sent_read_notify\) \{\n)'
+    r'(\t\t\tglink->sent_read_notify = true;\n)'
     r'(\t\t\tqcom_glink_send_read_notify\(glink\);\n)',
-    r'\1'
-    '\t\t\tpr_info_ratelimited("GLINKDIAG61 fifo-full avail=%zu need=%u@NL@",\n'
-    '\t\t\t\tqcom_glink_tx_avail(glink), tlen);\n'
-    r'\2',
-    'read_notify')
+    '\t\tpr_info_ratelimited("GLINKDIAG61 fifo-full avail=%zu need=%u notify=%d@NL@",\n'
+    '\t\t\t\t    qcom_glink_tx_avail(glink), tlen,\n'
+    '\t\t\t\t    glink->sent_read_notify);\n'
+    r'\1\2\3',
+    'fifo_full')
+
+# ---- 6. nudge implementation, inserted before the probe --------------------
+NUDGE = '''static ssize_t qcom_glink_nudge_write(struct file *filp,
+				      const char __user *ubuf,
+				      size_t count, loff_t *ppos)
+{
+	struct qcom_glink *glink = filp->private_data;
+	int ret;
+
+	if (!glink->mbox_chan)
+		return -ENODEV;
+
+	ret = mbox_send_message(glink->mbox_chan, NULL);
+	mbox_client_txdone(glink->mbox_chan, 0);
+
+	pr_info("GLINKDIAG61 nudge chan=%px ret=%d txavail=%zu@NL@",
+		glink->mbox_chan, ret, qcom_glink_tx_avail(glink));
+
+	return count;
+}
+
+static const struct file_operations qcom_glink_nudge_fops = {
+	.write = qcom_glink_nudge_write,
+	.open = simple_open,
+};
+
+'''
+
+sub_once(
+    r'(struct qcom_glink \*qcom_glink_native_probe\()',
+    NUDGE + r'\1',
+    'nudge_impl')
 
 src = src.replace('@NL@', chr(92) + 'n')
 
