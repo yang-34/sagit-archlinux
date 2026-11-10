@@ -1,0 +1,260 @@
+name: build61
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build61-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KERNEL_REPO: https://gitlab.com/msm8998-mainline/linux.git
+  KERNEL_BRANCH: master
+  ARCH: arm64
+  CROSS: aarch64-linux-gnu-
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 200
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+          nproc
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev \
+            device-tree-compiler cpio xz-utils zstd dwarves curl \
+            abootimg android-sdk-libsparse-utils qemu-user-static binfmt-support
+          sudo update-binfmts --enable qemu-aarch64 || true
+          command -v img2simg || echo "no img2simg, will use python fallback"
+
+      - name: Clone 6.1 kernel source (msm8998-mainline)
+        run: |
+          set -eux
+          git clone --depth 1 --branch "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+          cd kernel
+          git log -1 --oneline
+          head -4 Makefile | tail -3
+          ls arch/arm64/boot/dts/qcom/ | grep -i sagit
+          ls arch/arm64/configs/
+
+      - name: GLINK diag patch (6.1)
+        run: |
+          set -eux
+          cd kernel
+          python3 "$GITHUB_WORKSPACE/scripts/patch_glink_diag61.py" .
+          grep -n 'GLINKDIAG61' drivers/rpmsg/qcom_glink_native.c
+
+      - name: Configure 6.1 kernel
+        run: |
+          set -eux
+          cd kernel
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS msm8998_defconfig
+          scripts/config --file .config -e DEVTMPFS -e DEVTMPFS_MOUNT -e DRM -e DRM_MSM -e DRM_FBDEV_EMULATION -e FB -e FRAMEBUFFER_CONSOLE -e VT -e VT_CONSOLE -e SCSI_UFS_QCOM -e SCSI_UFSHCD -e SCSI_UFSHCD_PLTFRM -e EXT4_FS -e EFI_PARTITION -e USB_GADGET -e USB_CONFIGFS -e USB_F_RNDIS -e USB_F_ECM -e USB_CONFIGFS_RNDIS -e USB_CONFIGFS_ECM -e CONFIGFS_FS -e USB_DWC3 -e USB_DWC3_DUAL_ROLE -e USB_QCOM_DWC3 -e PHY_QCOM_QUSB2 -e PHY_QCOM_QMP -e QCOM_Q6V5_PAS -e QCOM_Q6V5_MSS -e QCOM_SMEM -e QCOM_SMD -e QCOM_SMD_RPM -e RPMSG_QCOM_GLINK -e RPMSG_QCOM_GLINK_SMEM -e QRTR -e QRTR_SMD -e QCOM_APCS_IPC -e MAILBOX -e QCOM_SMP2P -e QCOM_SMSM -e QCOM_SMEM_STATE
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS olddefconfig
+          echo "=== key symbols ==="
+          for s in CONFIG_DRM_MSM CONFIG_FRAMEBUFFER_CONSOLE CONFIG_SCSI_UFS_QCOM CONFIG_EXT4_FS CONFIG_USB_GADGET CONFIG_USB_CONFIGFS CONFIG_USB_F_RNDIS CONFIG_CONFIGFS_FS CONFIG_USB_DWC3 CONFIG_PHY_QCOM_QUSB2 CONFIG_QCOM_Q6V5_PAS CONFIG_QCOM_Q6V5_MSS CONFIG_QCOM_SMEM CONFIG_QRTR CONFIG_QRTR_SMD CONFIG_RPMSG_QCOM_GLINK CONFIG_QCOM_APCS_IPC CONFIG_QCOM_SMP2P CONFIG_QCOM_SMD_RPM; do echo "$s $(grep -E "^$s=" .config || echo MISSING)"; done
+
+      - name: Build kernel
+        run: |
+          set -eux
+          cd kernel
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS -j"$(nproc)" Image.gz dtbs
+          ls -l arch/arm64/boot/Image.gz
+          ls -l arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dtb
+
+      - name: Assemble Image.gz-dtb
+        run: |
+          set -eux
+          cd kernel
+          cat arch/arm64/boot/Image.gz arch/arm64/boot/dts/qcom/msm8998-xiaomi-sagit.dtb > Image.gz-dtb
+          ls -lh Image.gz-dtb
+          tar -czf /tmp/modules.tar.gz -T /dev/null
+          ls -lh /tmp/modules.tar.gz
+
+      - name: Build initramfs
+        run: |
+          set -eux
+          cd /tmp
+          curl -fsSL https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/aarch64/ -o alindex.html
+          PKG=$(grep -oE 'busybox-static-[0-9]+[^"<]*\.apk' alindex.html | head -1)
+          echo "busybox pkg: $PKG"
+          curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/aarch64/$PKG" -o bb.apk
+          mkdir -p bb
+          tar -xzf bb.apk -C bb || true
+          BB=$(find bb -type f -name 'busybox*' | head -1)
+          file "$BB"
+          mkdir -p initramfs/bin initramfs/dev initramfs/proc initramfs/sys initramfs/etc initramfs/tmp initramfs/newroot
+          cp "$BB" initramfs/bin/busybox
+          chmod +x initramfs/bin/busybox
+          for a in sh mount umount blkid sleep switch_root mkdir cat ls echo dmesg mdev \
+                   reboot poweroff insmod modprobe ifconfig ip find grep \
+                   head ln chmod sed printf mountpoint; do
+            ln -sf /bin/busybox initramfs/bin/$a
+          done
+          cat > initramfs/init <<'INITEOF'
+          #!/bin/sh
+          export PATH=/bin
+          mount -t devtmpfs devtmpfs /dev 2>/dev/null
+          mount -t proc proc /proc
+          mount -t sysfs sysfs /sys
+          find_root() {
+            for d in /dev/sd*[0-9]; do
+              [ -b "$d" ] || continue
+              mount -t ext4 -o ro "$d" /newroot 2>/dev/null || continue
+              if [ -f /newroot/etc/hostname ] && grep -q sagit /newroot/etc/hostname 2>/dev/null; then
+                umount /newroot
+                echo "$d"
+                return 0
+              fi
+              umount /newroot
+            done
+            return 1
+          }
+          i=0
+          R=""
+          while [ $i -lt 180 ]; do
+            R=$(find_root)
+            [ -n "$R" ] && break
+            i=$((i+1))
+            sleep 1
+          done
+          echo "root device: ${R:-none}"
+          [ -z "$R" ] && R=/dev/sda17
+          mount -t ext4 -o rw,noatime "$R" /newroot || {
+            echo "root mount failed"
+            sleep 3
+            echo b > /proc/sysrq-trigger 2>/dev/null
+            sleep 3
+            reboot -f 2>/dev/null
+            exec sh
+          }
+
+          cat > /newroot/usr/local/bin/usb-gadget.sh <<'GADGETEOF'
+          #!/bin/sh
+          set -e
+          mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+          G=/sys/kernel/config/usb_gadget/g1
+          [ -s "$G/UDC" ] && exit 0
+          mkdir -p "$G"
+          echo 0x1d6b > "$G/idVendor"
+          echo 0x0105 > "$G/idProduct"
+          mkdir -p "$G/strings/0x409"
+          echo sagit-archlinux > "$G/strings/0x409/serialnumber"
+          echo Xiaomi > "$G/strings/0x409/manufacturer"
+          echo Mi6-Arch > "$G/strings/0x409/product"
+          mkdir -p "$G/configs/c.1/strings/0x409"
+          echo rndis > "$G/configs/c.1/strings/0x409/configuration"
+          mkdir -p "$G/functions/rndis.usb0"
+          ln -sf "$G/functions/rndis.usb0" "$G/configs/c.1/rndis.usb0"
+          echo 0xEF > "$G/bDeviceClass"
+          echo 0x02 > "$G/bDeviceSubClass"
+          echo 0x01 > "$G/bDeviceProtocol"
+          echo 1 > "$G/os_desc/use"
+          echo 0xcd > "$G/os_desc/b_vendor_code"
+          echo MSFT100 > "$G/os_desc/qw_sign"
+          mkdir -p "$G/functions/rndis.usb0/os_desc/interface.rndis"
+          echo RNDIS > "$G/functions/rndis.usb0/os_desc/interface.rndis/compatible_id"
+          echo 5162001 > "$G/functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id"
+          ln -sf "$G/configs/c.1" "$G/os_desc/c.1"
+          UDC=$(ls /sys/class/udc | grep . | head -1)
+          [ -n "$UDC" ] && echo "$UDC" > "$G/UDC"
+          GADGETEOF
+          chmod +x /newroot/usr/local/bin/usb-gadget.sh
+
+          mkdir -p /newroot/etc/systemd/system/multi-user.target.wants
+          ln -sf /etc/systemd/system/usb-gadget.service /newroot/etc/systemd/system/multi-user.target.wants/usb-gadget.service
+
+          CFG=/newroot/etc/ssh/sshd_config
+          sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' "$CFG" 2>/dev/null
+          grep -q '^PermitRootLogin' "$CFG" 2>/dev/null || echo 'PermitRootLogin yes' >> "$CFG"
+          sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "$CFG" 2>/dev/null
+          grep -q '^PasswordAuthentication' "$CFG" 2>/dev/null || echo 'PasswordAuthentication yes' >> "$CFG"
+          mkdir -p /newroot/etc/ssh/sshd_config.d
+          printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' > /newroot/etc/ssh/sshd_config.d/99-root.conf
+          chmod 644 /newroot/etc/ssh/sshd_config.d/99-root.conf
+
+          mkdir -p /sys/kernel/config
+          mount -t configfs none /sys/kernel/config 2>/dev/null
+          G=/sys/kernel/config/usb_gadget/g1
+          mkdir -p "$G"
+          echo 0x1d6b > "$G/idVendor"
+          echo 0x0105 > "$G/idProduct"
+          mkdir -p "$G/strings/0x409"
+          echo sagit-archlinux > "$G/strings/0x409/serialnumber"
+          echo Xiaomi > "$G/strings/0x409/manufacturer"
+          echo Mi6-Arch > "$G/strings/0x409/product"
+          mkdir -p "$G/configs/c.1/strings/0x409"
+          echo rndis > "$G/configs/c.1/strings/0x409/configuration"
+          mkdir -p "$G/functions/rndis.usb0"
+          ln -sf "$G/functions/rndis.usb0" "$G/configs/c.1/rndis.usb0"
+          echo 0xEF > "$G/bDeviceClass"
+          echo 0x02 > "$G/bDeviceSubClass"
+          echo 0x01 > "$G/bDeviceProtocol"
+          echo 1 > "$G/os_desc/use"
+          echo 0xcd > "$G/os_desc/b_vendor_code"
+          echo MSFT100 > "$G/os_desc/qw_sign"
+          mkdir -p "$G/functions/rndis.usb0/os_desc/interface.rndis"
+          echo RNDIS > "$G/functions/rndis.usb0/os_desc/interface.rndis/compatible_id"
+          echo 5162001 > "$G/functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id"
+          ln -sf "$G/configs/c.1" "$G/os_desc/c.1"
+          UDC=$(ls /sys/class/udc | grep . | head -1)
+          [ -n "$UDC" ] && echo "$UDC" > "$G/UDC"
+
+          i=0
+          while [ ! -e /sys/class/net/usb0 ] && [ $i -lt 20 ]; do
+            i=$((i+1))
+            sleep 1
+          done
+          ifconfig usb0 192.168.42.1 netmask 255.255.255.0 up 2>/dev/null
+
+          mount --move /dev /newroot/dev
+          mount --move /proc /newroot/proc
+          mount --move /sys /newroot/sys
+          mkdir -p /newroot/dev/pts /newroot/dev/shm /newroot/run /newroot/sys/fs/cgroup
+          mount -t devpts devpts /newroot/dev/pts 2>/dev/null
+          mount -t tmpfs -o mode=1777,nosuid,nodev shm /newroot/dev/shm 2>/dev/null
+          mount -t tmpfs -o mode=0755,nosuid,nodev run /newroot/run 2>/dev/null
+          mount -t cgroup2 none /newroot/sys/fs/cgroup 2>/dev/null
+          exec switch_root /newroot /sbin/init
+          INITEOF
+          chmod +x initramfs/init
+          cd initramfs
+          find . | cpio -o -H newc 2>/dev/null | gzip -9 > /tmp/initramfs.gz
+          ls -lh /tmp/initramfs.gz
+
+      - name: Package boot.img
+        run: |
+          set -eux
+          cd kernel
+          cat > /tmp/bootimg.cfg <<'CFGEOF'
+          bootsize = 67108864
+          pagesize = 4096
+          kerneladdr = 0x00008000
+          ramdiskaddr = 0x01000000
+          secondaddr = 0x00F00000
+          tagsaddr = 0x00000100
+          name = sagit-archlinux
+          cmdline = console=ttyMSM0,115200n8 consoleblank=0 root=/dev/sda17 rw rootwait rootfstype=ext4 earlycon panic=30 transparent_hugepage=never
+          CFGEOF
+          abootimg --create /tmp/boot.img -f /tmp/bootimg.cfg -k Image.gz-dtb -r /tmp/initramfs.gz
+          abootimg -i /tmp/boot.img
+          ls -lh /tmp/boot.img
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp /tmp/boot.img /tmp/modules.tar.gz "$GITHUB_WORKSPACE/out/"
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel
+          path: out/
+          retention-days: 30
