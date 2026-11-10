@@ -39,7 +39,8 @@ sub_once(
     r'#include <linux/mailbox_client\.h>\n',
     '#include <linux/mailbox_client.h>\n'
     '#include <linux/debugfs.h>\n'
-    '#include <linux/fs.h>\n',
+    '#include <linux/fs.h>\n'
+    '#include <linux/uaccess.h>\n',
     'headers')
 
 # ---- 1. probe: channel, fifo sizes, features, debugfs nudge file ------------
@@ -54,8 +55,16 @@ sub_once(
     '\n'
     '\t{\n'
     '\t\tstruct dentry *__d = debugfs_create_dir(dev_name(dev), NULL);\n'
+    '\t\tstruct device_node *__np = of_find_compatible_node(NULL, NULL,\n'
+    '\t\t\t\t\t"qcom,msm8998-apcs-hmss-global");\n'
+    '\t\tif (__np) {\n'
+    '\t\t\tglink_apcs_base = of_iomap(__np, 0);\n'
+    '\t\t\tof_node_put(__np);\n'
+    '\t\t}\n'
     '\t\tdebugfs_create_file("nudge", 0200, __d, glink,\n'
     '\t\t\t\t    &qcom_glink_nudge_fops);\n'
+    '\t\tdebugfs_create_file("kick", 0200, __d, glink,\n'
+    '\t\t\t\t    &qcom_glink_kick_fops);\n'
     '\t}\n'
     '\n'
     '\tirq = of_irq_get',
@@ -104,8 +113,38 @@ sub_once(
     r'\1\2\3',
     'fifo_full')
 
-# ---- 6. nudge implementation, inserted before the probe --------------------
-NUDGE = '''static ssize_t qcom_glink_nudge_write(struct file *filp,
+# ---- 6. nudge / kick implementation, inserted before the probe -------------
+NUDGE = '''static void __iomem *glink_apcs_base;
+
+static ssize_t qcom_glink_kick_write(struct file *filp, const char __user *ubuf,
+				     size_t count, loff_t *ppos)
+{
+	char buf[8];
+	int bit;
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, count))
+		return -EFAULT;
+	buf[count] = 0;
+	if (kstrtoint(buf, 10, &bit) || bit < 0 || bit > 31)
+		return -EINVAL;
+	if (!glink_apcs_base)
+		return -ENODEV;
+
+	/* APCS IPC: the mailbox driver writes BIT(chan) at offset 8*4 = 0x20 */
+	writel(BIT(bit), glink_apcs_base + 0x20);
+	pr_info("GLINKDIAG61 kick bit=%d@NL@", bit);
+
+	return count;
+}
+
+static const struct file_operations qcom_glink_kick_fops = {
+	.write = qcom_glink_kick_write,
+	.open = simple_open,
+};
+
+static ssize_t qcom_glink_nudge_write(struct file *filp,
 				      const char __user *ubuf,
 				      size_t count, loff_t *ppos)
 {
