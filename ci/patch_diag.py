@@ -1,29 +1,49 @@
 #!/usr/bin/env python3
-"""Fix diag-router crashing on SET_ALL_MSG_MASK (0x7d/0x05).
+"""Make diag-router usable for modem F3 capture.
 
-peripheral_broadcast_msg_mask(NULL) is called by the 0x7d/0x05 handler, and
-diag_cntl_send_msg_mask() then dereferences `range` in the ALL_ENABLED branch
-(`diag_cmd_get_msg_mask(range, &mask)` and later `pkt->range = *range;`).
-With range == NULL the router segfaults inside diag_cmd_get_msg_mask:
+Two fixes:
 
-    #0 diag_cmd_get_msg_mask
-    #1 diag_cntl_send_msg_mask
-    #2 peripheral_broadcast_msg_mask
-    #3 handle_extended_message_configuration
+1) router/diag_cntl.c - crash on SET_ALL_MSG_MASK (0x7d/0x05)
+   peripheral_broadcast_msg_mask(NULL) is called by that handler, and
+   diag_cntl_send_msg_mask() dereferences `range` in the ALL_ENABLED branch:
 
-The fix substitutes a local full-range plus a 32-bit all-ones mask, which is
-the documented "all messages enabled" encoding.
+       #0 diag_cmd_get_msg_mask
+       #1 diag_cntl_send_msg_mask
+       #2 peripheral_broadcast_msg_mask
+       #3 handle_extended_message_configuration
+
+   Substitute a local full range plus one all-ones mask word.
+
+2) router/peripheral.c + peripheral.h + common_cmds.c - forward 0x7d upstream
+   The router answers DIAG_CMD_EXTENDED_MESSAGE_CONFIGURATION locally and never
+   tells the modem, so enabling messages has no effect on the modem and no F3
+   stream appears.  Add peripheral_broadcast_raw() and call it for every 0x7d
+   request before the local handling.
 """
 import sys
 
-PATH = sys.argv[1] if len(sys.argv) > 1 else 'router/diag_cntl.c'
+ROOT = sys.argv[1] if len(sys.argv) > 1 else 'router'
 
-OLD = """	} else if (status == DIAG_CTRL_MASK_ALL_ENABLED) {
+
+def patch(path, old, new, label):
+    src = open(path, encoding='utf-8').read()
+    if new in src:
+        print('already patched:', label)
+        return
+    if old not in src:
+        raise SystemExit('%s: anchor not found (%s)' % (path, label))
+    open(path, 'w', encoding='utf-8').write(src.replace(old, new, 1))
+    print('patched:', label)
+
+
+# ---- 1. NULL range ---------------------------------------------------------
+patch(
+    ROOT + '/diag_cntl.c',
+    """	} else if (status == DIAG_CTRL_MASK_ALL_ENABLED) {
 		diag_cmd_get_msg_mask(range, &mask);
 		num_items = 1;
-	}"""
-
-NEW = """	} else if (status == DIAG_CTRL_MASK_ALL_ENABLED) {
+	}""",
+    """	} else if (status == DIAG_CTRL_MASK_ALL_ENABLED) {
 		/* range may be NULL here: the 0x7d/0x05 handler calls
 		 * peripheral_broadcast_msg_mask(NULL).  Use a local full range and a
 		 * single all-ones mask word instead of dereferencing NULL. */
@@ -33,12 +53,50 @@ NEW = """	} else if (status == DIAG_CTRL_MASK_ALL_ENABLED) {
 		mask = malloc(sizeof(*mask));
 		if (mask)
 			*mask = 0xffffffff;
-	}"""
+	}""",
+    'diag_cntl.c ALL_ENABLED range')
 
-src = open(PATH, encoding='utf-8').read()
-if OLD not in src:
-    raise SystemExit('%s: ALL_ENABLED branch not found' % PATH)
+# ---- 2a. add peripheral_broadcast_raw --------------------------------------
+RAW_FN = """
+void peripheral_broadcast_raw(const void *ptr, size_t len)
+{
+	struct peripheral *peripheral;
+	struct list_head *item;
 
-src = src.replace(OLD, NEW, 1)
-open(PATH, 'w', encoding='utf-8').write(src)
-print('patched', PATH)
+	list_for_each(item, &peripherals) {
+		peripheral = container_of(item, struct peripheral, node);
+
+		peripheral_send(peripheral, ptr, len);
+	}
+}
+"""
+
+patch(
+    ROOT + '/peripheral.c',
+    """void peripheral_broadcast_msg_mask(struct diag_ssid_range_t *range)""",
+    RAW_FN.strip('\n') + """
+
+void peripheral_broadcast_msg_mask(struct diag_ssid_range_t *range)""",
+    'peripheral.c broadcast_raw')
+
+patch(
+    ROOT + '/peripheral.h',
+    'void peripheral_broadcast_msg_mask(struct diag_ssid_range_t *range);',
+    'void peripheral_broadcast_msg_mask(struct diag_ssid_range_t *range);\n'
+    'void peripheral_broadcast_raw(const void *ptr, size_t len);',
+    'peripheral.h prototype')
+
+# ---- 2b. forward 0x7d ------------------------------------------------------
+patch(
+    ROOT + '/common_cmds.c',
+    """static int handle_extended_message_configuration(struct diag_client *client,
+						 const void *buf, size_t len)
+{""",
+    """static int handle_extended_message_configuration(struct diag_client *client,
+						 const void *buf, size_t len)
+{
+	/* Also hand the request to the peripherals: the modem only starts
+	 * streaming F3 messages after it sees this command itself. */
+	peripheral_broadcast_raw(buf, len);
+""",
+    'common_cmds.c forward 0x7d')
