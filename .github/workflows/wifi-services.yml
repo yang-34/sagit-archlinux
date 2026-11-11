@@ -59,6 +59,12 @@ jobs:
           python3 ci/patch_pd_mapper.py pd-mapper/pd-mapper.c
           grep -n 'PD-MAPPER] get_domain_list\|PD-MAPPER] reply\|PD-MAPPER] qmi msg_id\|handle_pfr\|setvbuf' pd-mapper/pd-mapper.c
 
+      - name: "Patch diag-router - NULL range in SET_ALL_MSG_MASK broadcast"
+        run: |
+          set -eux
+          python3 ci/patch_diag.py diag/router/diag_cntl.c
+          grep -n 'all_range' diag/router/diag_cntl.c
+
       - name: Build and stage aarch64 binaries
         run: |
           set -eux
