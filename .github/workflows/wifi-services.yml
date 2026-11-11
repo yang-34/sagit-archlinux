@@ -59,6 +59,12 @@ jobs:
           python3 ci/patch_pd_mapper.py pd-mapper/pd-mapper.c
           grep -n 'PD-MAPPER] get_domain_list\|PD-MAPPER] reply\|PD-MAPPER] qmi msg_id\|handle_pfr\|setvbuf' pd-mapper/pd-mapper.c
 
+      - name: "Patch rmtfs - serve the sagit OEM EFS images"
+        run: |
+          set -eux
+          python3 ci/patch_rmtfs.py rmtfs/storage.c
+          grep -n 'modem_fsg_oem' rmtfs/storage.c
+
       - name: "Patch diag-router - NULL range in SET_ALL_MSG_MASK broadcast"
         run: |
           set -eux
