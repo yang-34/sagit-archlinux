@@ -62,7 +62,7 @@ jobs:
       - name: "Patch diag-router - NULL range in SET_ALL_MSG_MASK broadcast"
         run: |
           set -eux
-          python3 ci/patch_diag.py diag/router/diag_cntl.c
+          python3 ci/patch_diag.py diag/router
           grep -n 'all_range' diag/router/diag_cntl.c
 
       - name: Build and stage aarch64 binaries
